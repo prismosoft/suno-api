@@ -28,15 +28,6 @@ RUN npx playwright install chromium
 # RUN npx playwright install firefox                                                                                     
                                                                                                                     
 COPY --from=builder /src/.next ./.next
-COPY --from=builder /src/public/github-mark.png ./public/github-mark.png
-COPY --from=builder /src/public/github-logo.webp ./public/github-logo.webp
-COPY --from=builder /src/public/drag-instructions.jpg ./public/drag-instructions.jpg
-COPY --from=builder /src/public/get-cookie-demo.gif ./public/get-cookie-demo.gif
-COPY --from=builder /src/public/get-cookie-demo.mp4 ./public/get-cookie-demo.mp4
-COPY --from=builder /src/public/suno-banner.png ./public/suno-banner.png
-COPY --from=builder /src/public/vercel.svg ./public/vercel.svg
-COPY --from=builder /src/public/next.svg ./public/next.svg
-COPY --from=builder /src/public/swagger-suno-api.json ./public/swagger-suno-api.json
-COPY --from=builder /src/next.config.mjs ./next.config.mjs
+COPY --from=builder /src/public ./public
 EXPOSE 3000                                                                                                             
 CMD ["npm", "run", "start"]
