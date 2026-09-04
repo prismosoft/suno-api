@@ -5,6 +5,37 @@
   <p>Use API to call the music generation AI of Suno.ai and easily integrate it into agents like GPTs.</p>
   <p>👉 We update quickly, please star.</p>
 </div>
+
+> **Fork notes (prismosoft/suno-api)**
+>
+> This fork adds a **bearer token auth middleware** to protect all API endpoints (`/api/*` and `/v1/*`) from unauthorized access. The homepage and `/docs` page remain public.
+>
+> ### Added environment variable
+>
+> | Variable | Description |
+> |---|---|
+> | `API_BEARER_TOKEN` | Secret token required in the `Authorization` header for all API requests. Generate one with `openssl rand -hex 32`. |
+>
+> ### Usage
+>
+> All API requests must include the bearer token:
+>
+> ```bash
+> curl -H "Authorization: Bearer <your-token>" https://your-domain/api/get_limit
+> ```
+>
+> Requests without a valid token receive `401 Unauthorized`:
+>
+> ```json
+> {"error":"Unauthorized"}
+> ```
+>
+> ### Deploy
+>
+> Deployed on Railway (Docker, single service, no volume needed). Set all env vars in the Railway dashboard:
+> `SUNO_COOKIE`, `TWOCAPTCHA_KEY`, `BROWSER=chromium`, `BROWSER_HEADLESS=true`, `BROWSER_LOCALE=en`, `BROWSER_GHOST_CURSOR=false`, `API_BEARER_TOKEN`.
+>
+> No database, Redis, or extra services required. The `public/` folder (including `drag-instructions.jpg`) is baked into the Docker image at build time.
 <p align="center">
   <a target="_blank" href="./README.md">English</a> 
   | <a target="_blank" href="./README_CN.md">简体中文</a> 
