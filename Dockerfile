@@ -28,6 +28,5 @@ RUN npx playwright install chromium
 # RUN npx playwright install firefox                                                                                     
                                                                                                                     
 COPY --from=builder /src/.next ./.next
-COPY --from=builder /src/public ./public
 EXPOSE 3000                                                                                                             
 CMD ["npm", "run", "start"]
