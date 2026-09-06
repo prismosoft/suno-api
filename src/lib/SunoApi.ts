@@ -907,32 +907,18 @@ class SunoApi {
   }
 
   /**
-   * Updates an existing persona (name, description, visibility).
-   * NOTE: Suno's web app edits personas via this endpoint; if Suno changes
-   * their internal API this may 404. Verified variants are tried in order.
-   * @param personaId The persona ID to update.
+   * Deletes a persona.
+   * NOTE: Suno's internal API is undocumented; endpoint variants are tried in order.
+   * @param personaId The persona ID to delete.
    */
-  public async updatePersona(
-    personaId: string,
-    name?: string,
-    description?: string,
-    is_public?: boolean
-  ): Promise<any> {
+  public async deletePersona(personaId: string): Promise<any> {
     await this.keepAlive(false);
 
-    const payload: any = {};
-    if (name !== undefined) payload.name = name;
-    if (description !== undefined) payload.description = description;
-    if (is_public !== undefined) payload.is_public = is_public;
-
-    logger.info(`updatePersona ${personaId} payload:\n` + JSON.stringify(payload, null, 2));
-
-    // Try known Suno endpoint variants — their internal API is undocumented
     const variants = [
-      { method: 'post', url: `${SunoApi.BASE_URL}/api/persona/update/${personaId}/` },
-      { method: 'post', url: `${SunoApi.BASE_URL}/api/persona/${personaId}/update/` },
-      { method: 'patch', url: `${SunoApi.BASE_URL}/api/persona/update/${personaId}/` },
-      { method: 'patch', url: `${SunoApi.BASE_URL}/api/persona/${personaId}/` },
+      { method: 'post', url: `${SunoApi.BASE_URL}/api/persona/delete/${personaId}/` },
+      { method: 'delete', url: `${SunoApi.BASE_URL}/api/persona/delete/${personaId}/` },
+      { method: 'delete', url: `${SunoApi.BASE_URL}/api/persona/${personaId}/` },
+      { method: 'post', url: `${SunoApi.BASE_URL}/api/persona/${personaId}/delete/` },
     ];
 
     let lastError: any;
@@ -941,15 +927,14 @@ class SunoApi {
         const response = await this.client.request({
           method: variant.method,
           url: variant.url,
-          data: payload,
           timeout: 10000
         });
         if (response.status === 200) return response.data;
         lastError = new Error('Error response: ' + response.statusText);
       } catch (err: any) {
         lastError = err;
-        if (err.response?.status === 404) continue; // try next variant
-        throw err; // non-404 errors are real failures
+        if (err.response?.status === 404) continue;
+        throw err;
       }
     }
     throw lastError;

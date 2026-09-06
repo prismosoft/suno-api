@@ -99,6 +99,20 @@ async function apiPut(path, body) {
   return data;
 }
 
+async function apiDelete(path) {
+  const { apiUrl, apiToken } = getConfig();
+  const res = await fetch(`${apiUrl}${path}`, {
+    method: "DELETE",
+    headers: getHeaders(apiToken),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    console.error(`Error ${res.status}:`, data.error || data);
+    process.exit(1);
+  }
+  return data;
+}
+
 function printJson(data) {
   console.log(JSON.stringify(data, null, 2));
 }
@@ -636,15 +650,11 @@ program
     printJson(data);
   });
 
-// persona-update
+// persona-delete
 program
-  .command("persona-update")
-  .description("Update an existing persona (name, description, visibility)")
+  .command("persona-delete")
+  .description("Delete a persona (voice)")
   .option("-i, --id <persona_id>", "Persona ID (required)")
-  .option("-n, --name <name>", "New name")
-  .option("-d, --description <text>", "New description")
-  .option("--public", "Make the persona public")
-  .option("--private", "Make the persona private")
   .action(async (opts) => {
     await confirmConfig();
     let id = opts.id;
@@ -652,7 +662,7 @@ program
       const response = await prompts({
         type: "text",
         name: "value",
-        message: "Persona ID:",
+        message: "Persona ID to delete:",
       });
       id = response.value;
     }
@@ -660,17 +670,7 @@ program
       console.error("Persona ID is required.");
       process.exit(1);
     }
-    if (opts.public && opts.private) {
-      console.error("Cannot use --public and --private together.");
-      process.exit(1);
-    }
-    const payload = { persona_id: id };
-    if (opts.name) payload.name = opts.name;
-    if (opts.description) payload.description = opts.description;
-    if (opts.public) payload.is_public = true;
-    if (opts.private) payload.is_public = false;
-
-    const data = await apiPut("/api/persona", payload);
+    const data = await apiDelete(`/api/persona?id=${id}`);
     printJson(data);
   });
 

@@ -115,14 +115,14 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function PUT(req: NextRequest) {
-  if (req.method === 'PUT') {
+export async function DELETE(req: NextRequest) {
+  if (req.method === 'DELETE') {
     try {
-      const body = await req.json();
-      const { persona_id, name, description, is_public } = body;
+      const url = new URL(req.url);
+      const personaId = url.searchParams.get('id');
 
-      if (!persona_id) {
-        return new NextResponse(JSON.stringify({ error: 'persona_id is required' }), {
+      if (!personaId) {
+        return new NextResponse(JSON.stringify({ error: 'Missing parameter id' }), {
           status: 400,
           headers: {
             'Content-Type': 'application/json',
@@ -131,14 +131,9 @@ export async function PUT(req: NextRequest) {
         });
       }
 
-      const persona = await (await sunoApi((await cookies()).toString())).updatePersona(
-        persona_id,
-        name,
-        description,
-        is_public !== undefined ? Boolean(is_public) : undefined
-      );
+      const result = await (await sunoApi((await cookies()).toString())).deletePersona(personaId);
 
-      return new NextResponse(JSON.stringify(persona), {
+      return new NextResponse(JSON.stringify(result), {
         status: 200,
         headers: {
           'Content-Type': 'application/json',
@@ -146,7 +141,7 @@ export async function PUT(req: NextRequest) {
         }
       });
     } catch (error: any) {
-      console.error('Error updating persona:', error);
+      console.error('Error deleting persona:', error);
       return new NextResponse(JSON.stringify({ error: error.response?.data?.detail || error.message || 'Internal server error' }), {
         status: error.response?.status || 500,
         headers: {
@@ -158,7 +153,7 @@ export async function PUT(req: NextRequest) {
   } else {
     return new NextResponse('Method Not Allowed', {
       headers: {
-        Allow: 'PUT',
+        Allow: 'DELETE',
         ...corsHeaders
       },
       status: 405

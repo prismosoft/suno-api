@@ -13,7 +13,7 @@ All commands output JSON to stdout. Errors go to stderr with exit code 1.
 - User asks for word-level lyric timestamps (karaoke alignment)
 - User asks to generate a song **with a specific voice/persona**
 - User asks to **create a voice** from an existing song
-- User asks to look up or **edit a persona/voice**
+- User asks to look up or **delete a persona/voice**
 
 ## Prerequisites
 
@@ -261,20 +261,16 @@ generated song. The clip must be a **completed** song owned by the account.
 Returns the created persona object — its `id` is the `persona_id` to pass to
 `generate` / `custom-generate` with `--persona`.
 
-### `persona-update` — Edit an existing voice
+### `persona-delete` — Delete a voice
 ```bash
-suno-cli persona-update --id <persona_id> --name "New Name" --yes
-suno-cli persona-update --id <persona_id> --public --yes
+suno-cli persona-delete --id <persona_id> --yes
 ```
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `-i, --id` | string | required | Persona ID |
-| `-n, --name` | string | undefined | New name |
-| `-d, --description` | string | undefined | New description |
-| `--public` / `--private` | boolean | undefined | Toggle visibility |
+| `-i, --id` | string | required | Persona ID to delete |
 
-**Agent usage:** Use to rename, redescribe, or toggle visibility of a voice.
-Only pass the fields you want to change.
+**Agent usage:** Use when the user wants to remove a voice they created.
+Permanent — confirm with the user before deleting.
 
 ### `generate` / `custom-generate` with a voice
 ```bash
@@ -434,7 +430,7 @@ Base URL: `SUNO_API_URL` (default https://suno.prismosoft.com)
 | GET | `/api/get_limit` | Credit info |
 | GET | `/api/persona` | Persona info. Query: `id`, `page` |
 | POST | `/api/persona` | Create persona. Body: `root_clip_id`, `name`, `description`, `is_public`, `user_input_styles` |
-| PUT | `/api/persona` | Update persona. Body: `persona_id`, `name`, `description`, `is_public` |
+| DELETE | `/api/persona` | Delete persona. Query: `id` |
 | POST | `/v1/chat/completions` | OpenAI-compatible endpoint |
 
 ---
