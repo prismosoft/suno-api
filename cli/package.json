@@ -1,0 +1,40 @@
+{
+  "name": "suno-cli",
+  "description": "CLI for the Suno API — generate music, lyrics, and stems from your terminal",
+  "author": {
+    "name": "prismosoft",
+    "url": "https://github.com/prismosoft"
+  },
+  "license": "LGPL-3.0-or-later",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "suno-cli": "index.js"
+  },
+  "files": [
+    "index.js",
+    "commands",
+    "skills"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "prompts": "^2.4.2"
+  },
+  "keywords": [
+    "suno",
+    "suno-api",
+    "cli",
+    "music",
+    "ai",
+    "music-generation"
+  ],
+  "homepage": "https://github.com/prismosoft/suno-api",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/prismosoft/suno-api.git",
+    "directory": "cli"
+  }
+}

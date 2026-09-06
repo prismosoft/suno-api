@@ -1,0 +1,6 @@
+# Suno CLI environment variables
+# Copy to your shell profile or source this file:
+#   source ~/.suno-cli.env
+
+export SUNO_API_URL="https://suno.prismosoft.com"
+export SUNO_API_TOKEN="your-bearer-token-here"
