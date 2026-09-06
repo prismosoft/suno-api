@@ -102,23 +102,14 @@ async function confirmConfig() {
 
   const { apiUrl, apiToken } = getConfig();
 
+  // Token found — use it silently, no prompt
   if (apiToken) {
-    const choice = await prompts({
-      type: "select",
-      name: "value",
-      message: `API token detected. Continue with current config?`,
-      choices: [
-        { title: `Yes, use current settings (${apiUrl})`, value: "use" },
-        { title: "Reconfigure (enter new URL + token)", value: "reconfigure" },
-      ],
-    });
-    if (choice.value === "use") {
-      configConfirmed = true;
-      return { apiUrl, apiToken };
-    }
-  } else {
-    console.log("Welcome to suno-cli! No API token detected.\n");
+    configConfirmed = true;
+    return { apiUrl, apiToken };
   }
+
+  // First run — no token anywhere: prompt, save, done
+  console.log("Welcome to suno-cli! No API token detected.\n");
 
   const response = await prompts([
     {
@@ -160,42 +151,12 @@ async function confirmConfig() {
     ],
   });
 
-  function updateLocalEnv(url, token) {
-    let lines = [];
-    if (existsSync(localEnvPath)) {
-      lines = readFileSync(localEnvPath, "utf8").split("\n");
-    }
-    let foundUrl = false;
-    let foundToken = false;
-    lines = lines.map((line) => {
-      if (/^\s*(?:export\s+)?SUNO_API_URL\s*=/.test(line)) {
-        foundUrl = true;
-        return `SUNO_API_URL="${url}"`;
-      }
-      if (/^\s*(?:export\s+)?API_BEARER_TOKEN\s*=/.test(line)) {
-        foundToken = true;
-        return `API_BEARER_TOKEN="${token}"`;
-      }
-      return line;
-    });
-    if (!foundUrl) lines.push(`SUNO_API_URL="${url}"`);
-    if (!foundToken) lines.push(`API_BEARER_TOKEN="${token}"`);
-    writeFileSync(localEnvPath, lines.join("\n").replace(/\n{3,}/g, "\n\n") + "\n");
-  }
-
-  function updateHomeEnv(url, token) {
-    writeFileSync(
-      homeEnvPath,
-      `export SUNO_API_URL="${url}"\nexport SUNO_API_TOKEN="${token}"\n`
-    );
-  }
-
   if (save.value === "local" || save.value === "both") {
-    updateLocalEnv(response.url, response.token);
+    updateLocalEnv(localEnvPath, response.url, response.token);
     console.log(`\n  Updated ${localEnvPath}`);
   }
   if (save.value === "home" || save.value === "both") {
-    updateHomeEnv(response.url, response.token);
+    updateHomeEnv(homeEnvPath, response.url, response.token);
     console.log(`\n  Updated ${homeEnvPath}`);
     console.log("  Add this to your shell profile if not already loading it:");
     console.log(`  [ -f ~/.suno-cli.env ] && source ~/.suno-cli.env`);
@@ -207,6 +168,36 @@ async function confirmConfig() {
 
   configConfirmed = true;
   return { apiUrl: response.url, apiToken: response.token };
+}
+
+function updateLocalEnv(localEnvPath, url, token) {
+  let lines = [];
+  if (existsSync(localEnvPath)) {
+    lines = readFileSync(localEnvPath, "utf8").split("\n");
+  }
+  let foundUrl = false;
+  let foundToken = false;
+  lines = lines.map((line) => {
+    if (/^\s*(?:export\s+)?SUNO_API_URL\s*=/.test(line)) {
+      foundUrl = true;
+      return `SUNO_API_URL="${url}"`;
+    }
+    if (/^\s*(?:export\s+)?API_BEARER_TOKEN\s*=/.test(line)) {
+      foundToken = true;
+      return `API_BEARER_TOKEN="${token}"`;
+    }
+    return line;
+  });
+  if (!foundUrl) lines.push(`SUNO_API_URL="${url}"`);
+  if (!foundToken) lines.push(`API_BEARER_TOKEN="${token}"`);
+  writeFileSync(localEnvPath, lines.join("\n").replace(/\n{3,}/g, "\n\n") + "\n");
+}
+
+function updateHomeEnv(homeEnvPath, url, token) {
+  writeFileSync(
+    homeEnvPath,
+    `export SUNO_API_URL="${url}"\nexport SUNO_API_TOKEN="${token}"\n`
+  );
 }
 
 // ─── Commands ──────────────────────────────────────────────────────────────
@@ -228,6 +219,73 @@ program
     await confirmConfig();
     const data = await apiGet("/api/get_limit");
     printJson(data);
+  });
+
+// config
+program
+  .command("config")
+  .description("Configure API URL and token (re-run anytime to change)")
+  .action(async () => {
+    const { apiUrl, apiToken } = getConfig();
+    if (apiToken) {
+      console.log(`Current API URL: ${apiUrl}`);
+      console.log(`Current token: ${apiToken.slice(0, 8)}...${apiToken.slice(-4)}\n`);
+    }
+
+    const response = await prompts([
+      {
+        type: "text",
+        name: "url",
+        message: "API URL",
+        initial: apiUrl || "https://suno.prismosoft.com",
+      },
+      {
+        type: "password",
+        name: "token",
+        message: "API Bearer Token",
+      },
+    ]);
+
+    if (!response.token) {
+      console.error("Token is required.");
+      process.exit(1);
+    }
+
+    process.env.SUNO_API_URL = response.url;
+    process.env.SUNO_API_TOKEN = response.token;
+
+    const localEnvPath = join(process.cwd(), ".env");
+    const homeEnvPath = join(homedir(), ".suno-cli.env");
+    const localEnvExists = existsSync(localEnvPath);
+
+    const save = await prompts({
+      type: "select",
+      name: "value",
+      message: "Where should I save these?",
+      choices: [
+        ...(localEnvExists
+          ? [{ title: `Update ./.env (API_BEARER_TOKEN + SUNO_API_URL)`, value: "local" }]
+          : [{ title: `Create ./.env (API_BEARER_TOKEN + SUNO_API_URL)`, value: "local" }]),
+        { title: "Save to ~/.suno-cli.env (SUNO_API_URL + SUNO_API_TOKEN)", value: "home" },
+        { title: "Save to both", value: "both" },
+        { title: "Don't save — use this session only", value: "none" },
+      ],
+    });
+
+    if (save.value === "local" || save.value === "both") {
+      updateLocalEnv(localEnvPath, response.url, response.token);
+      console.log(`\n  Updated ${localEnvPath}`);
+    }
+    if (save.value === "home" || save.value === "both") {
+      updateHomeEnv(homeEnvPath, response.url, response.token);
+      console.log(`\n  Updated ${homeEnvPath}`);
+      console.log("  Add this to your shell profile if not already loading it:");
+      console.log(`  [ -f ~/.suno-cli.env ] && source ~/.suno-cli.env`);
+    }
+    if (save.value === "none") {
+      console.log("\n  Using for this session only.");
+    }
+    console.log("");
   });
 
 // generate
