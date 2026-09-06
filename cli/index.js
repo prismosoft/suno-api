@@ -2,12 +2,41 @@
 
 import { program } from "commander";
 import prompts from "prompts";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8"));
+
+// Auto-load env files: ~/.suno-cli.env, then ./.env (in order, latter wins)
+function loadEnvFiles() {
+  const envPaths = [
+    join(homedir(), ".suno-cli.env"),
+    join(process.cwd(), ".env"),
+  ];
+  for (const envPath of envPaths) {
+    if (existsSync(envPath)) {
+      const content = readFileSync(envPath, "utf8");
+      for (const line of content.split("\n")) {
+        const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s#]+))/);
+        if (match) {
+          const key = match[1];
+          const value = match[2] ?? match[3] ?? match[4] ?? "";
+          if (!process.env[key]) process.env[key] = value;
+        }
+      }
+    }
+  }
+}
+
+loadEnvFiles();
+
+// Map API_BEARER_TOKEN (app .env) to SUNO_API_TOKEN (CLI env) if not already set
+if (!process.env.SUNO_API_TOKEN && process.env.API_BEARER_TOKEN) {
+  process.env.SUNO_API_TOKEN = process.env.API_BEARER_TOKEN;
+}
 
 function getConfig() {
   const apiUrl = process.env.SUNO_API_URL || "https://suno.prismosoft.com";
@@ -66,7 +95,11 @@ function parseTimeToSeconds(time) {
   return 0;
 }
 
+let configConfirmed = false;
+
 async function confirmConfig() {
+  if (configConfirmed) return getConfig();
+
   const { apiUrl, apiToken } = getConfig();
 
   if (apiToken) {
@@ -79,7 +112,10 @@ async function confirmConfig() {
         { title: "Reconfigure (enter new URL + token)", value: "reconfigure" },
       ],
     });
-    if (choice.value === "use") return { apiUrl, apiToken };
+    if (choice.value === "use") {
+      configConfirmed = true;
+      return { apiUrl, apiToken };
+    }
   } else {
     console.log("Welcome to suno-cli! No API token detected.\n");
   }
@@ -106,26 +142,70 @@ async function confirmConfig() {
   process.env.SUNO_API_URL = response.url;
   process.env.SUNO_API_TOKEN = response.token;
 
+  const localEnvPath = join(process.cwd(), ".env");
+  const homeEnvPath = join(homedir(), ".suno-cli.env");
+  const localEnvExists = existsSync(localEnvPath);
+
   const save = await prompts({
-    type: "confirm",
+    type: "select",
     name: "value",
-    message: "Save these to ~/.suno-cli.env?",
-    initial: true,
+    message: "Where should I save these?",
+    choices: [
+      ...(localEnvExists
+        ? [{ title: `Update ./.env (API_BEARER_TOKEN + SUNO_API_URL)`, value: "local" }]
+        : [{ title: `Create ./.env (API_BEARER_TOKEN + SUNO_API_URL)`, value: "local" }]),
+      { title: "Save to ~/.suno-cli.env (SUNO_API_URL + SUNO_API_TOKEN)", value: "home" },
+      { title: "Save to both", value: "both" },
+      { title: "Don't save — use this session only", value: "none" },
+    ],
   });
 
-  if (save.value) {
-    const { writeFileSync } = await import("fs");
-    const { homedir } = await import("os");
-    const envPath = join(homedir(), ".suno-cli.env");
-    writeFileSync(
-      envPath,
-      `export SUNO_API_URL="${response.url}"\nexport SUNO_API_TOKEN="${response.token}"\n`
-    );
-    console.log(`\nSaved to ${envPath}`);
-    console.log("Add this to your shell profile if not already loading it:");
-    console.log(`  [ -f ~/.suno-cli.env ] && source ~/.suno-cli.env\n`);
+  function updateLocalEnv(url, token) {
+    let lines = [];
+    if (existsSync(localEnvPath)) {
+      lines = readFileSync(localEnvPath, "utf8").split("\n");
+    }
+    let foundUrl = false;
+    let foundToken = false;
+    lines = lines.map((line) => {
+      if (/^\s*(?:export\s+)?SUNO_API_URL\s*=/.test(line)) {
+        foundUrl = true;
+        return `SUNO_API_URL="${url}"`;
+      }
+      if (/^\s*(?:export\s+)?API_BEARER_TOKEN\s*=/.test(line)) {
+        foundToken = true;
+        return `API_BEARER_TOKEN="${token}"`;
+      }
+      return line;
+    });
+    if (!foundUrl) lines.push(`SUNO_API_URL="${url}"`);
+    if (!foundToken) lines.push(`API_BEARER_TOKEN="${token}"`);
+    writeFileSync(localEnvPath, lines.join("\n").replace(/\n{3,}/g, "\n\n") + "\n");
   }
 
+  function updateHomeEnv(url, token) {
+    writeFileSync(
+      homeEnvPath,
+      `export SUNO_API_URL="${url}"\nexport SUNO_API_TOKEN="${token}"\n`
+    );
+  }
+
+  if (save.value === "local" || save.value === "both") {
+    updateLocalEnv(response.url, response.token);
+    console.log(`\n  Updated ${localEnvPath}`);
+  }
+  if (save.value === "home" || save.value === "both") {
+    updateHomeEnv(response.url, response.token);
+    console.log(`\n  Updated ${homeEnvPath}`);
+    console.log("  Add this to your shell profile if not already loading it:");
+    console.log(`  [ -f ~/.suno-cli.env ] && source ~/.suno-cli.env`);
+  }
+  if (save.value === "none") {
+    console.log("\n  Using for this session only.");
+  }
+  console.log("");
+
+  configConfirmed = true;
   return { apiUrl: response.url, apiToken: response.token };
 }
 
@@ -134,7 +214,11 @@ async function confirmConfig() {
 program
   .name("suno-cli")
   .description("CLI for the Suno API — generate music, lyrics, and stems")
-  .version(pkg.version);
+  .version(pkg.version)
+  .option("-y, --yes", "Skip all confirmations — non-interactive mode for agents/scripts")
+  .hook("preAction", async (thisCommand) => {
+    if (thisCommand.opts().yes) configConfirmed = true;
+  });
 
 // limit
 program
