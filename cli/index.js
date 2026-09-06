@@ -806,12 +806,23 @@ program
 // skills install
 program
   .command("skills:install [dir]")
-  .description("Install agent skill files into a project directory (default: ./.agents/skills)")
+  .description("Install agent skill files (default: ./.agents/skills; use --global for ~/.agents/skills)")
   .option("--force", "Overwrite existing files")
+  .option("-g, --global", "Install to ~/.agents/skills (available to all projects)")
   .action(async (targetDir, opts) => {
     const { existsSync, mkdirSync, copyFileSync, rmSync } = await import("fs");
-    const { homedir } = await import("os");
-    const target = targetDir || join(process.cwd(), ".agents", "skills", "suno-cli");
+
+    let target;
+    if (opts.global) {
+      if (targetDir) {
+        console.error("Cannot combine --global with a target directory. Use either --global or a directory, not both.");
+        process.exit(1);
+      }
+      target = join(homedir(), ".agents", "skills", "suno-cli");
+    } else {
+      target = targetDir || join(process.cwd(), ".agents", "skills", "suno-cli");
+    }
+
     const skillsDir = join(__dirname, "skills");
 
     if (existsSync(target) && !opts.force) {
@@ -841,6 +852,11 @@ program
     console.log(`  ${target}/SKILL.md`);
     console.log(`  ${target}/suno-env.example`);
     if (existsSync(scriptSource)) console.log(`  ${target}/scripts/suno-wrapper.sh`);
+    if (opts.global) {
+      console.log("\nInstalled globally — available to agents in any directory.");
+    } else {
+      console.log(`\nInstalled locally to this project. Use --global to install to ~/.agents/skills instead.`);
+    }
     console.log("\nMake sure SUNO_API_URL and SUNO_API_TOKEN are set in your environment.");
     console.log("See suno-env.example for reference.\n");
   });
