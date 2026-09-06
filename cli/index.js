@@ -68,15 +68,28 @@ function parseTimeToSeconds(time) {
 
 async function confirmConfig() {
   const { apiUrl, apiToken } = getConfig();
-  if (apiToken) return { apiUrl, apiToken };
 
-  console.log("Welcome to suno-cli! Let's configure your connection.\n");
+  if (apiToken) {
+    const choice = await prompts({
+      type: "select",
+      name: "value",
+      message: `API token detected. Continue with current config?`,
+      choices: [
+        { title: `Yes, use current settings (${apiUrl})`, value: "use" },
+        { title: "Reconfigure (enter new URL + token)", value: "reconfigure" },
+      ],
+    });
+    if (choice.value === "use") return { apiUrl, apiToken };
+  } else {
+    console.log("Welcome to suno-cli! No API token detected.\n");
+  }
+
   const response = await prompts([
     {
       type: "text",
       name: "url",
       message: "API URL",
-      initial: "https://suno.prismosoft.com",
+      initial: apiUrl || "https://suno.prismosoft.com",
     },
     {
       type: "password",
@@ -96,7 +109,7 @@ async function confirmConfig() {
   const save = await prompts({
     type: "confirm",
     name: "value",
-    message: "Save these to your shell profile (~/.suno-cli.env)?",
+    message: "Save these to ~/.suno-cli.env?",
     initial: true,
   });
 
