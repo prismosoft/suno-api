@@ -1,6 +1,7 @@
 # Suno CLI Skill
 
 Use the `suno-cli` command to generate music, lyrics, and stems via the Suno API.
+All commands output JSON to stdout. Errors go to stderr with exit code 1.
 
 ## When to use
 
@@ -8,6 +9,9 @@ Use the `suno-cli` command to generate music, lyrics, and stems via the Suno API
 - User asks to write or generate lyrics
 - User asks to extend, remix, or split audio stems
 - User asks to check their Suno credit balance
+- User asks to concatenate extensions into a full song
+- User asks for word-level lyric timestamps (karaoke alignment)
+- User asks to look up a persona
 
 ## Prerequisites
 
@@ -17,11 +21,14 @@ Environment variables must be set:
 - `SUNO_API_TOKEN` — the bearer token
 
 If env vars are not set, the CLI will prompt interactively to configure them
-and optionally save to `~/.suno-cli.env`.
+and optionally save to `~/.suno-cli.env`. When env vars are already set, the CLI
+offers to use current settings or reconfigure.
+
+---
 
 ## Generation modes
 
-There are three ways to generate music depending on your workflow:
+Three ways to generate music depending on your workflow:
 
 ### Async (default) — fire and forget
 ```bash
@@ -36,7 +43,6 @@ suno-cli generate --prompt "A song about cats" --wait
 ```
 Holds the connection for up to 100s, polls internally, returns final results
 with `audio_url` when ready (or `error` if it failed).
-Same as `wait_audio: true` in the API.
 
 ### Async + separate polling (best for agents)
 ```bash
@@ -55,99 +61,328 @@ suno-cli get --ids abc123,def456
 ```
 
 The `wait` command keeps stderr for progress and stdout for clean JSON,
-so it can be piped in scripts: `suno-cli wait --ids abc123 | jq '.[0].audio_url'`.
+so it can be piped: `suno-cli wait --ids abc123 | jq '.[0].audio_url'`.
 Exit code 1 on timeout.
 
-**For agents:** use the async + polling pattern. Generate without `--wait`,
-then `suno-cli wait` to poll. This lets the agent do other things between
-checks rather than blocking on a single call.
+**For agents:** use async + polling. Generate without `--wait`, then
+`suno-cli wait` to poll. This lets the agent do other things between checks.
 
-## Commands
+---
 
-### Generate music
+## All commands — agent reference
+
+### `generate` — Generate music from a text prompt
 ```bash
-suno-cli generate --prompt "A heavy metal song about war" [--instrumental] [--wait]
+suno-cli generate --prompt "A heavy metal song about war"
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-p, --prompt` | string | required | Text prompt describing the music |
+| `-i, --instrumental` | boolean | false | Instrumental only (no vocals) |
+| `-m, --model` | string | chirp-v3-5 | Model name |
+| `-w, --wait` | boolean | false | Block until audio is ready |
 
-### Custom generate (lyrics + style + title)
+**Agent usage:** Call without `--wait` to get IDs fast, then poll with `wait`.
+Returns array of 2 clips (Suno generates 2 variations per request).
+If `--prompt` is omitted, the CLI prompts interactively (not for agents).
+
+**Output fields:** `id`, `title`, `status`, `audio_url`, `video_url`, `image_url`, `lyric`, `tags`, `duration`, `model_name`, `created_at`
+
+### `custom-generate` — Generate with full control (lyrics, style, title)
 ```bash
-suno-cli custom-generate --prompt "lyrics here" --tags "rock, upbeat" --title "My Song"
+suno-cli custom-generate --prompt "Verse 1...\nChorus..." --tags "rock, upbeat" --title "My Song"
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-p, --prompt` | string | required | Lyrics text |
+| `-t, --tags` | string | "" | Music style/genre tags |
+| `--title` | string | "" | Song title |
+| `-i, --instrumental` | boolean | false | Instrumental only |
+| `-m, --model` | string | chirp-v3-5 | Model name |
+| `-w, --wait` | boolean | false | Block until audio is ready |
+| `--negative-tags` | string | undefined | Tags to avoid |
 
-### Generate lyrics
+**Agent usage:** Use when the user provides specific lyrics or wants a particular
+style. The `prompt` should contain the full lyrics with section markers like
+`[Verse]`, `[Chorus]`, `[Bridge]`. Returns 2 clips.
+
+### `lyrics` — Generate lyrics from a prompt
 ```bash
-suno-cli lyrics --prompt "A song about the ocean"
+suno-cli lyrics --prompt "A song about the ocean, themes of loneliness and hope"
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-p, --prompt` | string | required | What the lyrics should be about |
 
-### Extend audio
+**Agent usage:** Use when the user wants lyrics only (no music). Returns an
+object with `text` containing the generated lyrics, `status`, and `id`.
+Can be used as a pre-step before `custom-generate` if the user wants to
+review/edit lyrics before generating music.
+
+### `extend` — Extend an existing audio clip
 ```bash
-suno-cli extend --id <clip_id> --prompt "more lyrics" --continue-at 01:30
+suno-cli extend --id abc123 --prompt "more lyrics here" --continue-at 01:30 --tags "rock"
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --id` | string | required | Audio clip ID to extend |
+| `-p, --prompt` | string | "" | Lyrics/prompt for the extension |
+| `-c, --continue-at` | mm:ss | 0 (end) | Timestamp to continue from |
+| `-t, --tags` | string | "" | Music style for the extension |
+| `--title` | string | "" | Title for the extension |
+| `-m, --model` | string | chirp-v3-5 | Model name |
+| `-w, --wait` | boolean | false | Block until audio is ready |
 
-### Generate stems (separate vocals/music)
+**Agent usage:** Use when the user has an existing song and wants to make it
+longer. `--continue-at` uses `mm:ss` format (e.g. `01:30` = 90 seconds).
+If omitted, extends from the end of the song. Returns 2 new clips that are
+extensions of the original.
+
+### `stems` — Separate vocals and music (stem tracks)
 ```bash
-suno-cli stems --id <audio_id>
+suno-cli stems --id abc123
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --id` | string | required | Audio clip ID |
 
-### Concatenate (full song from extensions)
+**Agent usage:** Use when the user wants to isolate vocals or instruments.
+Returns array of stem clips with `id`, `status`, `title`, `stem_from_id`,
+`duration`, `created_at`. Poll with `wait` using the returned IDs.
+
+### `concat` — Generate full song from extensions
 ```bash
-suno-cli concat --id <clip_id>
+suno-cli concat --id abc123
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --id` | string | required | Clip ID to concatenate |
 
-### Get music info
+**Agent usage:** Use after extending a song multiple times. Takes the base clip
+ID and concatenates all its extensions into one full song. Returns a single
+`AudioInfo` object with the concatenated result.
+
+### `get` — Get music info by IDs or list all
 ```bash
-suno-cli get --ids <id1,id2>    # specific songs
-suno-cli get                     # all songs
+suno-cli get --ids abc123,def456    # specific songs
+suno-cli get                         # all songs
+suno-cli get --page 2                # paginated
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --ids` | string | undefined | Comma-separated song IDs |
+| `--page` | string | undefined | Page number for pagination |
 
-### Get clip info
+**Agent usage:** Use to check song status (`queued`, `streaming`, `complete`,
+`error`) and retrieve `audio_url` / `video_url` when ready. Without `--ids`,
+returns all songs for the account (useful for listing recent creations).
+
+**Output fields:** `id`, `title`, `status`, `audio_url`, `video_url`,
+`image_url`, `lyric`, `prompt`, `tags`, `negative_tags`, `duration`,
+`model_name`, `created_at`, `type`, `error_message`
+
+### `clip` — Get single clip info
 ```bash
-suno-cli clip --id <clip_id>
+suno-cli clip --id abc123
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --id` | string | required | Clip ID |
 
-### Get aligned lyrics (word timestamps)
+**Agent usage:** Use to get detailed info about a single clip. Returns the raw
+clip object from Suno (more fields than `get`).
+
+### `aligned-lyrics` — Word-level timestamps (karaoke alignment)
 ```bash
-suno-cli aligned-lyrics --id <song_id>
+suno-cli aligned-lyrics --id abc123
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --id` | string | required | Song ID |
 
-### Get credit/quota info
+**Agent usage:** Use when the user wants karaoke-style timing data. Returns
+array of word objects: `word`, `start_s`, `end_s`, `success`, `p_align`.
+Song must be fully generated (`status: complete`) before this works.
+
+### `limit` — Get credit/quota info
 ```bash
 suno-cli limit
 ```
+No flags.
 
-### Wait for song completion
+**Agent usage:** Check before generating to see if credits are available.
+Returns: `credits_left`, `period`, `monthly_limit`, `monthly_usage`.
+Pro accounts have higher limits. Each `generate` call uses credits.
+
+### `wait` — Poll for song completion
 ```bash
-suno-cli wait --ids <id1,id2> --interval 5 --timeout 120
+suno-cli wait --ids abc123,def456 --interval 5 --timeout 120
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --ids` | string | required | Comma-separated song IDs |
+| `--interval` | number | 5 | Poll interval in seconds |
+| `--timeout` | number | 120 | Timeout in seconds |
 
-### Interactive mode
+**Agent usage:** Use after `generate` (without `--wait`) to poll until songs
+are ready. Prints progress to stderr (`Waiting... abc123: queued`), final JSON
+to stdout. Exit 0 when all songs are `complete`/`streaming` or `error`.
+Exit 1 on timeout. Safe to pipe: `suno-cli wait --ids abc123 | jq '.[0].audio_url'`.
+
+### `persona` — Get persona info
 ```bash
-suno-cli interactive
+suno-cli persona --id persona123 --page 1
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --id` | string | required | Persona ID |
+| `--page` | number | 1 | Page number |
 
-## Output
+**Agent usage:** Use to look up a Suno persona (artist profile). Returns
+persona details including `name`, `description`, `image`, clips, and metadata.
 
-All commands output JSON to stdout. Errors go to stderr with exit code 1.
-
-## Typical agent workflow
-
-1. Generate (async): `suno-cli generate --prompt "..."` → get clip IDs from JSON output
-2. Poll: `suno-cli wait --ids <id1,id2> --interval 5` → waits until status is `complete` or `streaming`
-3. Retrieve: `suno-cli get --ids <id1,id2>` → get `audio_url` and `video_url`
-4. Return audio URLs to user
-
-### Sync alternative (simpler, slower)
-1. Generate: `suno-cli generate --prompt "..." --wait` → blocks up to 100s, returns final result
-2. Return `audio_url` from output
-
-### Multiple songs
-Each `generate` call returns 2 clips (Suno generates 2 variations). To create
-multiple songs, fire several `generate` calls (sequentially, 1-2s apart to
-avoid rate limits), collect all IDs, then `suno-cli wait --ids <all-ids>` to
-poll them all at once. Suno renders them in parallel on its side.
-
-## OpenAI-compatible endpoint
-
+### `chat` — OpenAI-compatible chat completions
 ```bash
 suno-cli chat --messages '[{"role":"user","content":"Generate a song about cats"}]'
 ```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-m, --messages` | JSON string | required | Array of message objects |
+| `--model` | string | suno | Model name |
+| `--stream` | boolean | false | Stream response |
+
+**Agent usage:** Use when integrating with OpenAI-compatible tooling. The
+content of the user message becomes the generation prompt. Returns an
+OpenAI-format chat completion response with the generated song info.
+
+### `interactive` — Guided interactive menu
+```bash
+suno-cli interactive
+```
+No flags.
+
+**Agent usage:** Not for agents — this is for human users. Presents a menu
+to pick a command and prompts for all required inputs interactively.
+
+### `skills:install` — Install skill files into a project
+```bash
+suno-cli skills:install                    # installs to ./.agents/skills/suno-cli/
+suno-cli skills:install /path/to/project   # custom target
+suno-cli skills:install --force            # overwrite existing
+```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `[dir]` | string | ./.agents/skills/suno-cli | Target directory |
+| `--force` | boolean | false | Overwrite existing files |
+
+**Agent usage:** Use to install this skill into another project so other
+agents can discover and use `suno-cli`. Copies `SKILL.md`,
+`suno-env.example`, and `scripts/suno-wrapper.sh`.
+
+---
+
+## Typical agent workflows
+
+### Generate and return audio URL (async — recommended)
+```bash
+# 1. Generate — returns 2 clip IDs immediately
+suno-cli generate --prompt "A jazz song about rainy nights"
+
+# 2. Poll — waits until songs are ready
+suno-cli wait --ids <id1>,<id2> --interval 5 --timeout 120
+
+# 3. Return audio URLs to user
+# audio_url and video_url are in the final JSON output
+```
+
+### Generate and return audio URL (sync — simpler, blocks up to 100s)
+```bash
+suno-cli generate --prompt "A jazz song about rainy nights" --wait
+# audio_url is directly in the output
+```
+
+### Generate with custom lyrics and style
+```bash
+# Optionally generate lyrics first
+suno-cli lyrics --prompt "A song about overcoming adversity"
+
+# Then generate with the lyrics
+suno-cli custom-generate \
+  --prompt "[Verse 1]\nI was lost in the dark...\n[Chorus]\nBut I found my way" \
+  --tags "uplifting pop, acoustic guitar, warm vocals" \
+  --title "Finding My Way"
+
+# Poll for completion
+suno-cli wait --ids <id1>,<id2>
+```
+
+### Extend a song
+```bash
+# Get the original song ID
+suno-cli get
+
+# Extend from 01:30
+suno-cli extend --id <clip_id> --continue-at 01:30 --tags "rock"
+
+# Poll for the extension
+suno-cli wait --ids <new_id1>,<new_id2>
+
+# Concatenate all extensions into full song
+suno-cli concat --id <base_clip_id>
+```
+
+### Generate multiple songs at once
+```bash
+# Fire multiple generate calls (1-2s apart to avoid rate limits)
+suno-cli generate --prompt "A jazz song"
+suno-cli generate --prompt "A rock song"
+suno-cli generate --prompt "A pop song"
+
+# Collect all IDs, poll them all at once
+suno-cli wait --ids <jazz1>,<jazz2>,<rock1>,<rock2>,<pop1>,<pop2> --interval 5
+
+# Suno renders them in parallel on its side
+```
+
+### Check credits before generating
+```bash
+suno-cli limit
+# → {"credits_left": 2375, "monthly_limit": 2500, "monthly_usage": 140}
+# If credits_left is low, warn the user before generating
+```
+
+### Separate vocals from music
+```bash
+suno-cli stems --id <clip_id>
+suno-cli wait --ids <stem_id1>,<stem_id2>,<stem_id3>,<stem_id4>
+suno-cli get --ids <stem_ids>
+```
+
+---
+
+## Output format
+
+All commands output JSON to stdout. Example `generate` output:
+```json
+[
+  {
+    "id": "841d2c43-54aa-4c42-aa4c-990870996c45",
+    "title": "My Song",
+    "status": "complete",
+    "audio_url": "https://cdn2.suno.ai/audio_841d2c43....mp3",
+    "video_url": "https://cdn2.suno.ai/video_841d2c43....mp4",
+    "image_url": "https://cdn2.suno.ai/image_841d2c43....jpeg",
+    "lyric": "Verse 1...\nChorus...",
+    "tags": "rock, upbeat",
+    "duration": 248.6,
+    "model_name": "chirp-v3-5",
+    "created_at": "2026-09-04T17:00:00.000Z"
+  }
+]
+```
+
+Status values: `queued` → `streaming` → `complete` (or `error`)
+
+When status is `queued` or `streaming`, `audio_url` may be empty or
+`https://studio-api.prod.suno.com/api/forbidden`. Wait for `complete`
+before using the URLs.
