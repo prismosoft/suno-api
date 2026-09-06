@@ -883,6 +883,7 @@ class SunoApi {
 
     const payload: any = {
       root_clip_id,
+      clips: [root_clip_id],
       name,
       description: description || '',
       is_public
@@ -907,6 +908,8 @@ class SunoApi {
 
   /**
    * Updates an existing persona (name, description, visibility).
+   * NOTE: Suno's web app edits personas via this endpoint; if Suno changes
+   * their internal API this may 404. Verified variants are tried in order.
    * @param personaId The persona ID to update.
    */
   public async updatePersona(
@@ -924,16 +927,32 @@ class SunoApi {
 
     logger.info(`updatePersona ${personaId} payload:\n` + JSON.stringify(payload, null, 2));
 
-    const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/persona/update/${personaId}/`,
-      payload,
-      { timeout: 10000 }
-    );
+    // Try known Suno endpoint variants — their internal API is undocumented
+    const variants = [
+      { method: 'post', url: `${SunoApi.BASE_URL}/api/persona/update/${personaId}/` },
+      { method: 'post', url: `${SunoApi.BASE_URL}/api/persona/${personaId}/update/` },
+      { method: 'patch', url: `${SunoApi.BASE_URL}/api/persona/update/${personaId}/` },
+      { method: 'patch', url: `${SunoApi.BASE_URL}/api/persona/${personaId}/` },
+    ];
 
-    if (response.status !== 200) {
-      throw new Error('Error response: ' + response.statusText);
+    let lastError: any;
+    for (const variant of variants) {
+      try {
+        const response = await this.client.request({
+          method: variant.method,
+          url: variant.url,
+          data: payload,
+          timeout: 10000
+        });
+        if (response.status === 200) return response.data;
+        lastError = new Error('Error response: ' + response.statusText);
+      } catch (err: any) {
+        lastError = err;
+        if (err.response?.status === 404) continue; // try next variant
+        throw err; // non-404 errors are real failures
+      }
     }
-    return response.data;
+    throw lastError;
   }
 }
 
