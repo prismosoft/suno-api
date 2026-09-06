@@ -84,6 +84,21 @@ async function apiPost(path, body) {
   return data;
 }
 
+async function apiPut(path, body) {
+  const { apiUrl, apiToken } = getConfig();
+  const res = await fetch(`${apiUrl}${path}`, {
+    method: "PUT",
+    headers: getHeaders(apiToken),
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    console.error(`Error ${res.status}:`, data.error || data);
+    process.exit(1);
+  }
+  return data;
+}
+
 function printJson(data) {
   console.log(JSON.stringify(data, null, 2));
 }
@@ -296,6 +311,7 @@ program
   .option("-i, --instrumental", "Generate instrumental only (no vocals)")
   .option("-m, --model <model>", "Model name (default: chirp-v3-5)")
   .option("-w, --wait", "Wait for audio to finish generating")
+  .option("-V, --persona <id>", "Persona/voice ID to generate with")
   .action(async (opts) => {
     await confirmConfig();
     let prompt = opts.prompt;
@@ -316,6 +332,7 @@ program
       make_instrumental: !!opts.instrumental,
       model: opts.model || undefined,
       wait_audio: !!opts.wait,
+      persona_id: opts.persona || undefined,
     };
     const data = await apiPost("/api/generate", payload);
     printJson(data);
@@ -332,6 +349,7 @@ program
   .option("-m, --model <model>", "Model name")
   .option("-w, --wait", "Wait for audio to finish")
   .option("--negative-tags <tags>", "Tags to avoid")
+  .option("-V, --persona <id>", "Persona/voice ID to generate with")
   .action(async (opts) => {
     await confirmConfig();
     let prompt = opts.prompt;
@@ -367,6 +385,7 @@ program
       model: opts.model || undefined,
       wait_audio: !!opts.wait,
       negative_tags: opts.negativeTags || undefined,
+      persona_id: opts.persona || undefined,
     };
     const data = await apiPost("/api/custom_generate", payload);
     printJson(data);
@@ -547,10 +566,10 @@ program
     printJson(data);
   });
 
-// persona
+// persona (get)
 program
   .command("persona")
-  .description("Get persona info by ID")
+  .description("Get persona (voice) info by ID")
   .option("-i, --id <persona_id>", "Persona ID")
   .option("--page <page>", "Page number")
   .action(async (opts) => {
@@ -570,6 +589,88 @@ program
     }
     const page = opts.page ? `&page=${opts.page}` : "";
     const data = await apiGet(`/api/persona?id=${id}${page}`);
+    printJson(data);
+  });
+
+// persona-create
+program
+  .command("persona-create")
+  .description("Create a persona (voice) from a completed clip you own")
+  .option("-c, --clip <clip_id>", "Root clip ID to create the persona from (required)")
+  .option("-n, --name <name>", "Persona display name (required)")
+  .option("-d, --description <text>", "Persona description")
+  .option("--styles <styles>", "User input styles (e.g. 'soulful vocals, R&B')")
+  .option("--public", "Make the persona public (default: private)")
+  .action(async (opts) => {
+    await confirmConfig();
+    let clip = opts.clip;
+    let name = opts.name;
+    if (!clip || !name) {
+      const questions = [];
+      if (!clip) questions.push({
+        type: "text",
+        name: "clip",
+        message: "Root clip ID (a completed song you own):",
+      });
+      if (!name) questions.push({
+        type: "text",
+        name: "name",
+        message: "Persona name:",
+      });
+      const response = await prompts(questions);
+      clip = clip || response.clip;
+      name = name || response.name;
+    }
+    if (!clip || !name) {
+      console.error("Both --clip and --name are required.");
+      process.exit(1);
+    }
+    const payload = {
+      root_clip_id: clip,
+      name,
+      description: opts.description || "",
+      is_public: !!opts.public,
+      user_input_styles: opts.styles || undefined,
+    };
+    const data = await apiPost("/api/persona", payload);
+    printJson(data);
+  });
+
+// persona-update
+program
+  .command("persona-update")
+  .description("Update an existing persona (name, description, visibility)")
+  .option("-i, --id <persona_id>", "Persona ID (required)")
+  .option("-n, --name <name>", "New name")
+  .option("-d, --description <text>", "New description")
+  .option("--public", "Make the persona public")
+  .option("--private", "Make the persona private")
+  .action(async (opts) => {
+    await confirmConfig();
+    let id = opts.id;
+    if (!id) {
+      const response = await prompts({
+        type: "text",
+        name: "value",
+        message: "Persona ID:",
+      });
+      id = response.value;
+    }
+    if (!id) {
+      console.error("Persona ID is required.");
+      process.exit(1);
+    }
+    if (opts.public && opts.private) {
+      console.error("Cannot use --public and --private together.");
+      process.exit(1);
+    }
+    const payload = { persona_id: id };
+    if (opts.name) payload.name = opts.name;
+    if (opts.description) payload.description = opts.description;
+    if (opts.public) payload.is_public = true;
+    if (opts.private) payload.is_public = false;
+
+    const data = await apiPut("/api/persona", payload);
     printJson(data);
   });
 

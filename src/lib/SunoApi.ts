@@ -449,7 +449,8 @@ class SunoApi {
     prompt: string,
     make_instrumental: boolean = false,
     model?: string,
-    wait_audio: boolean = false
+    wait_audio: boolean = false,
+    persona_id?: string
   ): Promise<AudioInfo[]> {
     await this.keepAlive(false);
     const startTime = Date.now();
@@ -460,7 +461,12 @@ class SunoApi {
       undefined,
       make_instrumental,
       model,
-      wait_audio
+      wait_audio,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      persona_id
     );
     const costTime = Date.now() - startTime;
     logger.info('Generate Response:\n' + JSON.stringify(audios, null, 2));
@@ -509,7 +515,8 @@ class SunoApi {
     make_instrumental: boolean = false,
     model?: string,
     wait_audio: boolean = false,
-    negative_tags?: string
+    negative_tags?: string,
+    persona_id?: string
   ): Promise<AudioInfo[]> {
     const startTime = Date.now();
     const audios = await this.generateSongs(
@@ -520,7 +527,11 @@ class SunoApi {
       make_instrumental,
       model,
       wait_audio,
-      negative_tags
+      negative_tags,
+      undefined,
+      undefined,
+      undefined,
+      persona_id
     );
     const costTime = Date.now() - startTime;
     logger.info(
@@ -555,7 +566,8 @@ class SunoApi {
     negative_tags?: string,
     task?: string,
     continue_clip_id?: string,
-    continue_at?: number
+    continue_at?: number,
+    persona_id?: string
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
     const payload: any = {
@@ -568,6 +580,9 @@ class SunoApi {
       task: task,
       token: await this.getCaptcha()
     };
+    if (persona_id) {
+      payload.persona_id = persona_id;
+    }
     if (isCustom) {
       payload.tags = tags;
       payload.title = title;
@@ -845,6 +860,79 @@ class SunoApi {
       throw new Error('Error response: ' + response.statusText);
     }
 
+    return response.data;
+  }
+
+  /**
+   * Creates a persona (voice) from a completed clip owned by the account.
+   * @param root_clip_id The clip ID to derive the persona from.
+   * @param name Display name for the persona.
+   * @param description Optional description.
+   * @param is_public Whether the persona is public. Default false.
+   * @param user_input_styles Optional style description.
+   * @returns The created persona object (includes id for use as persona_id in generate).
+   */
+  public async createPersona(
+    root_clip_id: string,
+    name: string,
+    description?: string,
+    is_public: boolean = false,
+    user_input_styles?: string
+  ): Promise<any> {
+    await this.keepAlive(false);
+
+    const payload: any = {
+      root_clip_id,
+      name,
+      description: description || '',
+      is_public
+    };
+    if (user_input_styles) {
+      payload.user_input_styles = user_input_styles;
+    }
+
+    logger.info('createPersona payload:\n' + JSON.stringify(payload, null, 2));
+
+    const response = await this.client.post(
+      `${SunoApi.BASE_URL}/api/persona/create/`,
+      payload,
+      { timeout: 30000 }
+    );
+
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Updates an existing persona (name, description, visibility).
+   * @param personaId The persona ID to update.
+   */
+  public async updatePersona(
+    personaId: string,
+    name?: string,
+    description?: string,
+    is_public?: boolean
+  ): Promise<any> {
+    await this.keepAlive(false);
+
+    const payload: any = {};
+    if (name !== undefined) payload.name = name;
+    if (description !== undefined) payload.description = description;
+    if (is_public !== undefined) payload.is_public = is_public;
+
+    logger.info(`updatePersona ${personaId} payload:\n` + JSON.stringify(payload, null, 2));
+
+    const response = await this.client.post(
+      `${SunoApi.BASE_URL}/api/persona/update/${personaId}/`,
+      payload,
+      { timeout: 10000 }
+    );
+
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
     return response.data;
   }
 }

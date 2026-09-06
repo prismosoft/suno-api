@@ -11,7 +11,9 @@ All commands output JSON to stdout. Errors go to stderr with exit code 1.
 - User asks to check their Suno credit balance
 - User asks to concatenate extensions into a full song
 - User asks for word-level lyric timestamps (karaoke alignment)
-- User asks to look up a persona
+- User asks to generate a song **with a specific voice/persona**
+- User asks to **create a voice** from an existing song
+- User asks to look up or **edit a persona/voice**
 
 ## Prerequisites
 
@@ -230,7 +232,7 @@ are ready. Prints progress to stderr (`Waiting... abc123: queued`), final JSON
 to stdout. Exit 0 when all songs are `complete`/`streaming` or `error`.
 Exit 1 on timeout. Safe to pipe: `suno-cli wait --ids abc123 | jq '.[0].audio_url'`.
 
-### `persona` — Get persona info
+### `persona` — Get persona (voice) info
 ```bash
 suno-cli persona --id persona123 --page 1 --yes
 ```
@@ -239,8 +241,53 @@ suno-cli persona --id persona123 --page 1 --yes
 | `-i, --id` | string | required | Persona ID |
 | `--page` | number | 1 | Page number |
 
-**Agent usage:** Use to look up a Suno persona (artist profile). Returns
+**Agent usage:** Use to look up a Suno persona (voice profile). Returns
 persona details including `name`, `description`, `image`, clips, and metadata.
+
+### `persona-create` — Create a voice from a song you own
+```bash
+suno-cli persona-create --clip <clip_id> --name "My Voice" --description "soulful R&B vocals" --styles "soulful vocals, R&B" --yes
+```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-c, --clip` | string | required | Root clip ID (a completed song owned by the account) |
+| `-n, --name` | string | required | Persona display name |
+| `-d, --description` | string | "" | Persona description |
+| `--styles` | string | undefined | Style description (e.g. "soulful vocals, R&B") |
+| `--public` | boolean | false | Make persona public (default private) |
+
+**Agent usage:** Use when the user wants to create a reusable voice from a
+generated song. The clip must be a **completed** song owned by the account.
+Returns the created persona object — its `id` is the `persona_id` to pass to
+`generate` / `custom-generate` with `--persona`.
+
+### `persona-update` — Edit an existing voice
+```bash
+suno-cli persona-update --id <persona_id> --name "New Name" --yes
+suno-cli persona-update --id <persona_id> --public --yes
+```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-i, --id` | string | required | Persona ID |
+| `-n, --name` | string | undefined | New name |
+| `-d, --description` | string | undefined | New description |
+| `--public` / `--private` | boolean | undefined | Toggle visibility |
+
+**Agent usage:** Use to rename, redescribe, or toggle visibility of a voice.
+Only pass the fields you want to change.
+
+### `generate` / `custom-generate` with a voice
+```bash
+suno-cli generate --prompt "A song about cats" --persona <persona_id> --yes
+suno-cli custom-generate --prompt "lyrics..." --tags "rock" --title "My Song" --persona <persona_id> --yes
+```
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-V, --persona` | string | undefined | Persona (voice) ID to generate with |
+
+**Agent usage:** Pass `--persona <id>` to generate songs using a specific
+voice. Combine with lyrics (`custom-generate --prompt`) and styles
+(`--tags`) for full control: voice + lyrics + style in one call.
 
 ### `chat` — OpenAI-compatible chat completions
 ```bash
@@ -339,7 +386,56 @@ suno-cli limit --yes# → {"credits_left": 2375, "monthly_limit": 2500, "monthly
 
 ### Separate vocals from music
 ```bash
-suno-cli stems --id <clip_id> --yessuno-cli wait --ids <stem_id1>,<stem_id2>,<stem_id3>,<stem_id4> --yessuno-cli get --ids <stem_ids> --yes```
+suno-cli stems --id <clip_id> --yes
+suno-cli wait --ids <stem_id1>,<stem_id2>,<stem_id3>,<stem_id4> --yes
+suno-cli get --ids <stem_ids> --yes
+```
+
+### Create a voice from a song, then generate with it
+```bash
+# 1. Generate a song with a voice the user likes
+suno-cli generate --prompt "A soulful female R&B vocalist singing about love" --yes
+suno-cli wait --ids <id1>,<id2> --yes
+
+# 2. Create a persona (voice) from the completed clip
+suno-cli persona-create --clip <clip_id> --name "Soulful Voice" \
+  --description "Warm soulful female R&B vocals" --styles "soulful vocals, R&B" --yes
+# → returns persona with "id"
+
+# 3. Generate new songs using that voice + custom lyrics + style
+suno-cli custom-generate \
+  --prompt "[Verse]\nYour lyrics here...\n[Chorus]\n..." \
+  --tags "R&B, smooth, 80 BPM" \
+  --title "New Song" \
+  --persona <persona_id> --yes
+
+# 4. Poll and return
+suno-cli wait --ids <id1>,<id2> --yes
+```
+
+---
+
+## REST API reference (for direct HTTP calls)
+
+All endpoints require `Authorization: Bearer <token>` header.
+Base URL: `SUNO_API_URL` (default https://suno.prismosoft.com)
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/api/generate` | Generate music. Body: `prompt`, `make_instrumental`, `model`, `wait_audio`, `persona_id` |
+| POST | `/api/custom_generate` | Generate with lyrics/style/title. Body adds: `tags`, `title`, `negative_tags`, `persona_id` |
+| POST | `/api/generate_lyrics` | Generate lyrics. Body: `prompt` |
+| POST | `/api/extend_audio` | Extend a clip. Body: `audio_id`, `prompt`, `continue_at`, `tags`, `title` |
+| POST | `/api/generate_stems` | Split stems. Body: `audio_id` |
+| POST | `/api/concat` | Concatenate extensions. Body: `clip_id` |
+| GET | `/api/get` | List songs. Query: `ids`, `page` |
+| GET | `/api/clip` | Clip info. Query: `id` |
+| GET | `/api/get_aligned_lyrics` | Word timestamps. Query: `song_id` |
+| GET | `/api/get_limit` | Credit info |
+| GET | `/api/persona` | Persona info. Query: `id`, `page` |
+| POST | `/api/persona` | Create persona. Body: `root_clip_id`, `name`, `description`, `is_public`, `user_input_styles` |
+| PUT | `/api/persona` | Update persona. Body: `persona_id`, `name`, `description`, `is_public` |
+| POST | `/v1/chat/completions` | OpenAI-compatible endpoint |
 
 ---
 
