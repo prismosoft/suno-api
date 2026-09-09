@@ -3,7 +3,7 @@ import { cookies } from 'next/headers';
 import { DEFAULT_MODEL, sunoApi } from "@/lib/SunoApi";
 import { corsHeaders } from "@/lib/utils";
 
-export const maxDuration = 60; // allow longer timeout for wait_audio == true
+export const maxDuration = 600; // captcha solving (multi-round hCaptcha via 2Captcha) can take minutes
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {

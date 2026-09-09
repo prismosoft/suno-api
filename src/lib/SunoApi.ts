@@ -18,7 +18,7 @@ const cache = globalForSunoApi.sunoApiCache || new Map<string, SunoApi>();
 globalForSunoApi.sunoApiCache = cache;
 
 const logger = pino();
-export const DEFAULT_MODEL = 'chirp-v3-5';
+export const DEFAULT_MODEL = 'chirp-hawk'; // Suno v6
 
 export interface AudioInfo {
   id: string; // Unique identifier for the audio
@@ -79,6 +79,7 @@ class SunoApi {
   private userAgent?: string;
   private cookies: Record<string, string | undefined>;
   private solver = new Solver(process.env.TWOCAPTCHA_KEY + '');
+  private pendingTurnstileTimeouts: NodeJS.Timeout[] = [];
   private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
   private cursor?: Cursor;
 
@@ -273,11 +274,16 @@ class SunoApi {
       args.push('--enable-unsafe-swiftshader',
         '--disable-gpu',
         '--disable-setuid-sandbox');
-    const browser = await this.getBrowserType().launch({
+    const launchOptions: any = {
       args,
       headless: yn(process.env.BROWSER_HEADLESS, { default: true })
-    });
-    const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: null });
+    };
+    // Prefer the real installed Chrome when available — Turnstile/Cloudflare trust its
+    // fingerprint far more than the bundled Chromium (which is flagged as automation).
+    if (process.env.BROWSER_CHROME_CHANNEL && ['chrome', 'msedge', 'chromium'].includes(process.env.BROWSER_CHROME_CHANNEL))
+      launchOptions.channel = process.env.BROWSER_CHROME_CHANNEL;
+    const browser = await this.getBrowserType().launch(launchOptions);
+    const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: { width: 1440, height: 900 } });
     const cookies = [];
     const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
     cookies.push({
@@ -305,12 +311,23 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
+    // Clear any stale Turnstile fallback timers from earlier requests so they
+    // cannot close a freshly launched browser mid-flow.
+    for (const t of this.pendingTurnstileTimeouts.splice(0))
+      clearTimeout(t);
+
     if (!await this.captchaRequired())
       return null;
 
     logger.info('CAPTCHA required. Launching browser...')
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
+    browser.on('close', () => logger.info('DEBUG: captcha browser closed (stack follows)'));
+    // Force the Turnstile widget to fail so Suno latches its hCaptcha fallback
+    // (isTurnstileFallbackLatched in their frontend bundle): the hCaptcha challenge
+    // is then solved in-page by 2Captcha and its token is session-bound, unlike an
+    // out-of-band Turnstile token which Suno rejects (token_validation_failed).
+    await page.route('**/challenges.cloudflare.com/**', route => route.abort());
     await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
 
     logger.info('Waiting for Suno interface to load');
@@ -319,30 +336,68 @@ class SunoApi {
 
     if (this.ghostCursorEnabled)
       this.cursor = await createCursor(page);
-    
+
     logger.info('Triggering the CAPTCHA');
     try {
       await page.getByLabel('Close').click({ timeout: 2000 }); // close all popups
       // await this.click(page, { x: 318, y: 13 });
     } catch(e) {}
 
-    const textarea = page.locator('.custom-textarea');
-    await this.click(textarea);
+    // Give the create UI a moment to finish hydrating before interacting, and
+    // dismiss the OneTrust consent banner which can cover the prompt textarea.
+    await sleep(4, 6);
+    await page.evaluate(() => {
+      ['#onetrust-consent-sdk', '#onetrust-banner-sdk', '#onetrust-pc-sdk'].forEach(s => document.querySelector(s)?.remove());
+    }).catch(() => {});
+
+    // Explicitly switch to the Simple tab (the visible prompt textarea there is the
+    // one that triggers generation when Create is clicked).
+    await page.getByLabel('Simple', { exact: true }).click({ timeout: 10000 }).catch(() => {});
+    await sleep(1, 2);
+
+    const textarea = page.locator('textarea:visible').first();
+    await textarea.click({ timeout: 30000 });
     await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
 
-    const button = page.locator('button[aria-label="Create"]').locator('div.flex');
-    this.click(button);
+    const button = page.locator('button[aria-label="Create song"]:visible').first();
+    await button.click({ timeout: 30000 });
 
+    // Suno captcha v2: Cloudflare Turnstile (invisible) — the generate/v2 request is
+    // intercepted with the token already attached. If the widget auto-solves, the
+    // interception below resolves immediately. If Turnstile fails, Suno falls back
+    // to the hCaptcha v1 flow (challenge iframe solved via 2Captcha).
     const controller = new AbortController();
     new Promise<void>(async (resolve, reject) => {
-      const frame = page.frameLocator('iframe[title*="hCaptcha"]');
-      const challenge = frame.locator('.challenge-container');
+      // Suno proxies hCaptcha and mounts multiple iframes (anchor + challenge).
+      // Locate the frame whose challenge is actually rendered (prompt text visible).
+      let challenge: any = null;
+      for (let i = 0; i < 45; i++) { // wait up to ~90s for the challenge DOM to hydrate
+        for (const f of page.frames()) {
+          if (f === page.mainFrame()) continue;
+          try {
+            const prompt = f.locator('.challenge-container .prompt-text').first();
+            if (await prompt.count() > 0 && await prompt.isVisible().catch(() => false)) {
+              challenge = f.locator('.challenge-container');
+              break;
+            }
+          } catch {}
+        }
+        if (challenge) break;
+        await sleep(1.5, 2);
+      }
+      if (!challenge)
+        throw new Error('hCaptcha challenge container never appeared');
+      const challengeFrame = page.frames().find(f => f !== page.mainFrame() && f.locator('.challenge-container .prompt-text').first().isVisible().then(() => true).catch(() => false));
+      const frameOrChallenge: any = challengeFrame || challenge;
+      logger.info('hCaptcha challenge detected');
       try {
-        let wait = true;
+        // The challenge is already rendered at this point — its asset requests fired
+        // during page load, so skip the request-quiet detection on the first pass.
+        let wait = false;
         while (true) {
           if (wait)
             await waitForRequests(page, controller.signal);
-          const drag = (await challenge.locator('.prompt-text').first().innerText()).toLowerCase().includes('drag');
+          const drag = (await challenge.locator('.prompt-text').first().innerText({ timeout: 15000 })).toLowerCase().includes('drag');
           let captcha: any;
           for (let j = 0; j < 3; j++) { // try several times because sometimes 2Captcha could return an error
             try {
@@ -393,12 +448,23 @@ class SunoApi {
               await this.click(challenge, { x: +data.x, y: +data.y });
             };
           }
-          this.click(frame.locator('.button-submit')).catch(e => {
+          // Submit. In Suno's proxied hCaptcha the submit control can live outside
+          // .challenge-container (and disappears once the challenge is accepted),
+          // so look in the whole frame and tolerate an already-submitted state.
+          const submit = frameOrChallenge.locator('.button-submit').first();
+          try {
+            await this.click(submit);
+          } catch (e: any) {
             if (e.message.includes('viewport')) // when hCaptcha window has been closed due to inactivity,
               this.click(button); // click the Create button again to trigger the CAPTCHA
-            else
+            else if (e.message.includes('Timeout')) {
+              // Submit control never appeared — likely the challenge round was
+              // auto-accepted (single-round) or already moved on. Keep waiting for
+              // the generate/v2 interception instead of dying.
+              logger.info('Submit button not present; waiting for challenge outcome');
+            } else
               throw e;
-          });
+          }
         }
       } catch(e: any) {
         if (e.message.includes('been closed') // catch error when closing the browser
@@ -412,20 +478,66 @@ class SunoApi {
       throw e;
     });
     return (new Promise((resolve, reject) => {
-      page.route('**/api/generate/v2/**', async (route: any) => {
+      // Race 1: the browser flow above completes and generate/v2 fires with the token
+      page.route('**/api/generate/v2-web/**', async (route: any) => {
         try {
-          logger.info('hCaptcha token received. Closing browser');
+          const request = route.request();
+          const token = request.postDataJSON().token;
+          if (!token) {
+            // generate was attempted without a captcha token — let Suno's UI latch the
+            // hCaptcha fallback and continue waiting; do not abort the route.
+            route.continue().catch(() => {});
+            return;
+          }
+          logger.info('Captcha token received from browser flow. Closing browser');
           route.abort();
           browser.browser()?.close();
           controller.abort();
-          const request = route.request();
           this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          resolve(request.postDataJSON().token);
+          resolve(token);
         } catch(err) {
           reject(err);
         }
       });
+
+      // Race 2: if neither Turnstile auto-solve nor the hCaptcha challenge produces a
+      // generate/v2 request within 5 minutes, solve Turnstile out-of-band via 2Captcha
+      // and resolve with that token. The deadline is generous on purpose: the in-page
+      // hCaptcha loop (session-bound, the only token Suno accepts from us) can take
+      // several human-solved rounds.
+      const turnstileFallback = setTimeout(async () => {
+        try {
+          const token = await this.solveTurnstileVia2Captcha();
+          if (token) {
+            logger.info('Turnstile solved via 2Captcha. Closing browser');
+            controller.abort();
+            browser.browser()?.close().catch(() => {});
+            resolve(token);
+          }
+        } catch (e: any) {
+          logger.info('2Captcha Turnstile fallback failed: ' + e.message);
+        }
+      }, 300000);
+      this.pendingTurnstileTimeouts.push(turnstileFallback);
     }));
+  }
+
+  /**
+   * Solves Suno's generation Turnstile (captcha v2) out-of-band via the 2Captcha Turnstile API.
+   * Uses the generation sitekey from Suno's own frontend bundle.
+   */
+  private async solveTurnstileVia2Captcha(): Promise<string|null> {
+    const siteKey = process.env.SUNO_TURNSTILE_SITEKEY || '0x4AAAAAADI7xDNyj-3LcIbi';
+    const pageUrl = 'https://suno.com/create';
+    logger.info('Solving Turnstile via 2Captcha');
+    try {
+      const res = await this.solver.cloudflareTurnstile({ pageurl: pageUrl, sitekey: siteKey });
+      logger.info('Turnstile solved by 2Captcha: ' + res.data.slice(0, 20) + '...');
+      return res.data;
+    } catch (e: any) {
+      logger.info('2Captcha Turnstile error: ' + e.message);
+      return null;
+    }
   }
 
   /**
@@ -609,7 +721,7 @@ class SunoApi {
         )
     );
     const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/v2/`,
+      `${SunoApi.BASE_URL}/api/generate/v2-web/`,
       payload,
       {
         timeout: 10000 // 10 seconds timeout
