@@ -5,13 +5,13 @@ import prompts from "prompts";
 import { readFileSync, existsSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { Agent } from "undici";
+import { Agent, setGlobalDispatcher } from "undici";
 import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Long-running generation requests (captcha solving can take minutes) exceed
-// undici's default 300s headersTimeout, so route fetches through a patient agent.
-const dispatcher = new Agent({ headersTimeout: 15 * 60 * 1000, bodyTimeout: 15 * 60 * 1000 });
+// undici's default 300s headersTimeout — raise it globally.
+setGlobalDispatcher(new Agent({ headersTimeout: 15 * 60 * 1000, bodyTimeout: 15 * 60 * 1000 }));
 const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8"));
 
 // Auto-load env files: ~/.suno-cli.env, then ./.env (in order, latter wins)
@@ -80,7 +80,6 @@ async function apiPost(path, body) {
     headers: getHeaders(apiToken),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(Number(process.env.SUNO_CLI_TIMEOUT_MS) || 15 * 60 * 1000),
-    dispatcher,
   });
   const data = await res.json();
   if (!res.ok) {
