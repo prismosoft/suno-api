@@ -5,9 +5,13 @@ import prompts from "prompts";
 import { readFileSync, existsSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { Agent } from "undici";
 import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// Long-running generation requests (captcha solving can take minutes) exceed
+// undici's default 300s headersTimeout, so route fetches through a patient agent.
+const dispatcher = new Agent({ headersTimeout: 15 * 60 * 1000, bodyTimeout: 15 * 60 * 1000 });
 const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8"));
 
 // Auto-load env files: ~/.suno-cli.env, then ./.env (in order, latter wins)
@@ -75,6 +79,8 @@ async function apiPost(path, body) {
     method: "POST",
     headers: getHeaders(apiToken),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(Number(process.env.SUNO_CLI_TIMEOUT_MS) || 15 * 60 * 1000),
+    dispatcher,
   });
   const data = await res.json();
   if (!res.ok) {
@@ -234,7 +240,7 @@ function updateHomeEnv(homeEnvPath, url, token) {
 program
   .name("suno-cli")
   .description("CLI for the Suno API — generate music, lyrics, and stems")
-  .version(pkg.version)
+  .version(pkg.version, "--cli-version")
   .option("-y, --yes", "Skip all confirmations — non-interactive mode for agents/scripts")
   .hook("preAction", async (thisCommand) => {
     if (thisCommand.opts().yes) configConfirmed = true;
