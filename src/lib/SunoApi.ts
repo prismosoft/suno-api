@@ -395,8 +395,24 @@ class SunoApi {
         // during page load, so skip the request-quiet detection on the first pass.
         let wait = false;
         while (true) {
-          if (wait)
+          if (false && wait)
             await waitForRequests(page, controller.signal);
+          // hCaptcha rebuilds its challenge (sometimes in a fresh frame) after each
+          // round — re-locate the live challenge container before every round.
+          let liveChallenge: any = null;
+          for (const f of page.frames()) {
+            if (f === page.mainFrame()) continue;
+            try {
+              const prompt = f.locator('.challenge-container .prompt-text').first();
+              if (await prompt.count() > 0 && await prompt.isVisible().catch(() => false)) {
+                liveChallenge = f.locator('.challenge-container');
+                break;
+              }
+            } catch {}
+          }
+          if (!liveChallenge)
+            liveChallenge = challenge; // fall back to the original container
+          challenge = liveChallenge;
           const drag = (await challenge.locator('.prompt-text').first().innerText({ timeout: 15000 })).toLowerCase().includes('drag');
           let captcha: any;
           for (let j = 0; j < 3; j++) { // try several times because sometimes 2Captcha could return an error
@@ -451,7 +467,7 @@ class SunoApi {
           // Submit. In Suno's proxied hCaptcha the submit control can live outside
           // .challenge-container (and disappears once the challenge is accepted),
           // so look in the whole frame and tolerate an already-submitted state.
-          const submit = frameOrChallenge.locator('.button-submit').first();
+          const submit = (challenge.frame ? challenge.frame() : frameOrChallenge).locator('.button-submit').first();
           try {
             await this.click(submit);
           } catch (e: any) {
