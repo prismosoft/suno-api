@@ -154,7 +154,7 @@ BROWSER_HEADLESS=true
   - Visit the `https://<vercel-assigned-domain>/api/get_limit` API for testing.
 - If running locally:
   - Run `npm run dev`.
-  - Visit the `http://localhost:3000/api/get_limit` API for testing.
+  - Visit the `http://localhost:4242/api/get_limit` API for testing.
 - If the following result is returned:
 
 ```json
@@ -206,7 +206,7 @@ import time
 import requests
 
 # replace with your suno-api URL
-base_url = 'http://localhost:3000'
+base_url = 'http://localhost:4242'
 
 
 def custom_generate_audio(payload):
@@ -276,7 +276,7 @@ if __name__ == '__main__':
 const axios = require("axios");
 
 // replace your vercel domain
-const baseUrl = "http://localhost:3000";
+const baseUrl = "http://localhost:4242";
 
 async function customGenerateAudio(payload) {
   const url = `${baseUrl}/api/custom_generate`;
