@@ -20,7 +20,19 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const buffer = await (await sunoApi()).decryptClipMedia(clipId);
+    let buffer: Buffer | null = null;
+    let lastError: any = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        buffer = await (await sunoApi()).decryptClipMedia(clipId);
+        break;
+      } catch (err: any) {
+        lastError = err;
+        console.error(`Decrypt attempt ${attempt + 1} failed:`, err?.message);
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+      }
+    }
+    if (!buffer) throw lastError;
 
     return new NextResponse(new Uint8Array(buffer), {
       status: 200,

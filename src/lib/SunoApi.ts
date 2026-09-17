@@ -1037,9 +1037,14 @@ class SunoApi {
 
     const mediaResp = await this.client.get(
       `https://d2lwuy8qc234o3.cloudfront.net/1/clip/${clipId}.m4a`,
-      { responseType: 'arraybuffer', timeout: 300000 }
+      { responseType: 'stream', timeout: 300000 }
     );
-    const enc = Buffer.from(mediaResp.data);
+    const enc = await new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      mediaResp.data.on('data', (c: Buffer) => chunks.push(c));
+      mediaResp.data.on('end', () => resolve(Buffer.concat(chunks)));
+      mediaResp.data.on('error', reject);
+    });
 
     const out = Buffer.alloc(enc.length);
     const BLOCKS_PER_CHUNK = 4096;
