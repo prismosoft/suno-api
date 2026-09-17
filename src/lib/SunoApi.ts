@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import UserAgent from 'user-agents';
 import pino from 'pino';
 import yn from 'yn';
@@ -87,8 +88,14 @@ class SunoApi {
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
     this.cookies = cookie.parse(cookies);
     this.deviceId = this.cookies.ajs_anonymous_id || randomUUID();
+    // Optional outbound proxy (e.g. Proxidize sticky IP). Route all Suno API
+    // traffic through it so captcha tokens solved over the same IP bind
+    // correctly (Suno validates token + IP + session together).
+    const proxyUrl = process.env.SUNO_PROXY_URL;
+    const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
     this.client = axios.create({
       withCredentials: true,
+      ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent, proxy: false } : {}),
       headers: {
         'Affiliate-Id': 'undefined',
         'Device-Id': `"${this.deviceId}"`,
@@ -283,7 +290,16 @@ class SunoApi {
     if (process.env.BROWSER_CHROME_CHANNEL && ['chrome', 'msedge', 'chromium'].includes(process.env.BROWSER_CHROME_CHANNEL))
       launchOptions.channel = process.env.BROWSER_CHROME_CHANNEL;
     const browser = await this.getBrowserType().launch(launchOptions);
-    const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: { width: 1440, height: 900 } });
+    // Route the captcha browser through the same proxy as the API client so the
+    // solved token is bound to the IP our requests come from.
+    const proxyUrl = process.env.SUNO_PROXY_URL;
+    const proxy = proxyUrl ? this.parseProxy(proxyUrl) : undefined;
+    const context = await browser.newContext({
+      userAgent: this.userAgent,
+      locale: process.env.BROWSER_LOCALE,
+      viewport: { width: 1440, height: 900 },
+      ...(proxy ? { proxy } : {})
+    });
     const cookies = [];
     const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
     cookies.push({
@@ -459,9 +475,22 @@ class SunoApi {
             }
             wait = true;
           } else {
+            // Use real mouse events (move → press → release) at page-level coordinates.
+            // hCaptcha rejects synthetic locator clicks with no mouse trajectory, which
+            // made every solved round silently fail and never submit.
+            const box = await challenge.boundingBox();
+            if (box == null)
+              throw new Error('.challenge-container boundingBox is null!');
             for (const data of captcha.data) {
               logger.info(data);
-              await this.click(challenge, { x: +data.x, y: +data.y });
+              const x = box.x + +data.x;
+              const y = box.y + +data.y;
+              await page.mouse.move(x - 8, y - 6, { steps: 12 });
+              await page.mouse.move(x, y, { steps: 6 });
+              await page.mouse.down();
+              await sleep(0.12, 0.3);
+              await page.mouse.up();
+              await sleep(0.25, 0.5);
             };
           }
           // Submit. In Suno's proxied hCaptcha the submit control can live outside
@@ -547,13 +576,39 @@ class SunoApi {
     const pageUrl = 'https://suno.com/create';
     logger.info('Solving Turnstile via 2Captcha');
     try {
-      const res = await this.solver.cloudflareTurnstile({ pageurl: pageUrl, sitekey: siteKey });
+      // Solve through the same proxy as our API client so the token is bound to
+      // the IP our requests originate from (Suno validates token + IP together).
+      const proxyUrl = process.env.SUNO_PROXY_URL;
+      const params: any = { pageurl: pageUrl, sitekey: siteKey };
+      if (proxyUrl) {
+        const { username, password, host, port } = this.parseProxy(proxyUrl);
+        params.proxy = [username, password].filter(Boolean).join(':') + '@' + host + ':' + port;
+        params.proxytype = 'HTTP';
+        logger.info('2Captcha solving Turnstile via proxy ' + host + ':' + port);
+      }
+      const res = await this.solver.cloudflareTurnstile(params);
       logger.info('Turnstile solved by 2Captcha: ' + res.data.slice(0, 20) + '...');
       return res.data;
     } catch (e: any) {
       logger.info('2Captcha Turnstile error: ' + e.message);
       return null;
     }
+  }
+
+  /**
+   * Parses a proxy URL into Playwright/2captcha proxy components.
+   * Supports http://user:pass@host:port and http://host:port.
+   */
+  private parseProxy(proxyUrl: string): { server: string, username?: string, password?: string, host: string, port: string } {
+    const u = new URL(proxyUrl);
+    const port = u.port || '80';
+    return {
+      server: `http://${u.hostname}:${port}`,
+      username: u.username ? decodeURIComponent(u.username) : undefined,
+      password: u.password ? decodeURIComponent(u.password) : undefined,
+      host: u.hostname,
+      port
+    };
   }
 
   /**
