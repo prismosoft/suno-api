@@ -3,13 +3,11 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import UserAgent from 'user-agents';
 import pino from 'pino';
 import yn from 'yn';
-import { isPage, sleep, waitForRequests } from '@/lib/utils';
+import { sleep } from '@/lib/utils';
 import * as cookie from 'cookie';
 import { randomUUID } from 'node:crypto';
 import { Solver } from '@2captcha/captcha-solver';
-import { paramsCoordinates } from '@2captcha/captcha-solver/dist/structs/2captcha';
 import { BrowserContext, Page, Locator, chromium, firefox } from 'rebrowser-playwright-core';
-import { createCursor, Cursor } from 'ghost-cursor-playwright';
 import { promises as fs } from 'fs';
 import path from 'node:path';
 
@@ -80,9 +78,6 @@ class SunoApi {
   private userAgent?: string;
   private cookies: Record<string, string | undefined>;
   private solver = new Solver(process.env.TWOCAPTCHA_KEY + '');
-  private pendingTurnstileTimeouts: NodeJS.Timeout[] = [];
-  private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
-  private cursor?: Cursor;
 
   constructor(cookies: string) {
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
@@ -220,31 +215,6 @@ class SunoApi {
   }
 
   /**
-   * Clicks on a locator or XY vector. This method is made because of the difference between ghost-cursor-playwright and Playwright methods
-   */
-  private async click(target: Locator|Page, position?: { x: number, y: number }): Promise<void> {
-    if (this.ghostCursorEnabled) {
-      let pos: any = isPage(target) ? { x: 0, y: 0 } : await target.boundingBox();
-      if (position) 
-        pos = {
-          ...pos,
-          x: pos.x + position.x,
-          y: pos.y + position.y,
-          width: null,
-          height: null,
-        };
-      return this.cursor?.actions.click({
-        target: pos
-      });
-    } else {
-      if (isPage(target))
-        return target.mouse.click(position?.x ?? 0, position?.y ?? 0);
-      else
-        return target.click({ force: true, position });
-    }
-  }
-
-  /**
    * Get the BrowserType from the `BROWSER` environment variable.
    * @returns {BrowserType} chromium, firefox or webkit. Default is chromium
    */
@@ -324,273 +294,95 @@ class SunoApi {
 
   /**
    * Checks for CAPTCHA verification and solves the CAPTCHA if needed
-   * @returns {string|null} hCaptcha token. If no verification is required, returns null
+   * @returns {string|null} null when no captcha is required; otherwise the RAW
+   * JSON response body of the successful in-page generate/v2-web request.
    */
-  public async getCaptcha(): Promise<string|null> {
-    // Clear any stale Turnstile fallback timers from earlier requests so they
-    // cannot close a freshly launched browser mid-flow.
-    for (const t of this.pendingTurnstileTimeouts.splice(0))
-      clearTimeout(t);
-
+  public async getCaptcha(prompt: string, isCustom: boolean, tags?: string, title?: string, make_instrumental?: boolean, model?: string, negative_tags?: string, persona_id?: string): Promise<string|null> {
     if (!await this.captchaRequired())
       return null;
 
     logger.info('CAPTCHA required. Launching browser...')
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
-    browser.on('close', () => logger.info('DEBUG: captcha browser closed (stack follows)'));
-    // Force the Turnstile widget to fail so Suno latches its hCaptcha fallback
-    // (isTurnstileFallbackLatched in their frontend bundle): the hCaptcha challenge
-    // is then solved in-page by 2Captcha and its token is session-bound, unlike an
-    // out-of-band Turnstile token which Suno rejects (token_validation_failed).
-    await page.route('**/challenges.cloudflare.com/**', route => route.abort());
-    await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
 
-    logger.info('Waiting for Suno interface to load');
-    // await page.locator('.react-aria-GridList').waitFor({ timeout: 60000 });
-    await page.waitForResponse('**/api/project/**\\?**', { timeout: 60000 }); // wait for song list API call
-
-    if (this.ghostCursorEnabled)
-      this.cursor = await createCursor(page);
-
-    logger.info('Triggering the CAPTCHA');
-    try {
-      await page.getByLabel('Close').click({ timeout: 2000 }); // close all popups
-      // await this.click(page, { x: 318, y: 13 });
-    } catch(e) {}
-
-    // Give the create UI a moment to finish hydrating before interacting, and
-    // dismiss the OneTrust consent banner which can cover the prompt textarea.
-    await sleep(4, 6);
-    await page.evaluate(() => {
-      ['#onetrust-consent-sdk', '#onetrust-banner-sdk', '#onetrust-pc-sdk'].forEach(s => document.querySelector(s)?.remove());
-    }).catch(() => {});
-
-    // Explicitly switch to the Simple tab (the visible prompt textarea there is the
-    // one that triggers generation when Create is clicked).
-    await page.getByLabel('Simple', { exact: true }).click({ timeout: 10000 }).catch(() => {});
-    await sleep(1, 2);
-
-    const textarea = page.locator('textarea:visible').first();
-    await textarea.click({ timeout: 30000 });
-    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
-
-    const button = page.locator('button[aria-label="Create song"]:visible').first();
-    await button.click({ timeout: 30000 });
-
-    // Suno captcha v2: Cloudflare Turnstile (invisible) — the generate/v2 request is
-    // intercepted with the token already attached. If the widget auto-solves, the
-    // interception below resolves immediately. If Turnstile fails, Suno falls back
-    // to the hCaptcha v1 flow (challenge iframe solved via 2Captcha).
-    const controller = new AbortController();
-    new Promise<void>(async (resolve, reject) => {
-      // Suno proxies hCaptcha and mounts multiple iframes (anchor + challenge).
-      // Locate the frame whose challenge is actually rendered (prompt text visible).
-      let challenge: any = null;
-      for (let i = 0; i < 45; i++) { // wait up to ~90s for the challenge DOM to hydrate
-        for (const f of page.frames()) {
-          if (f === page.mainFrame()) continue;
-          try {
-            const prompt = f.locator('.challenge-container .prompt-text').first();
-            if (await prompt.count() > 0 && await prompt.isVisible().catch(() => false)) {
-              challenge = f.locator('.challenge-container');
-              break;
-            }
-          } catch {}
+    // Navigate and wait until the page makes its own authenticated studio-api call,
+    // then borrow that exact Authorization header for our in-page fetch.
+    logger.info('Loading suno.com/create in the captcha browser...');
+    await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 120000 });
+    let pageAuthHeader: string | null = null;
+    page.on('request', r => {
+      if (r.url().includes('studio-api') && !pageAuthHeader) {
+        const a = r.headers()['authorization'];
+        if (a) {
+          pageAuthHeader = a;
+          logger.info('Captured page auth header');
         }
-        if (challenge) break;
-        await sleep(1.5, 2);
       }
-      if (!challenge)
-        throw new Error('hCaptcha challenge container never appeared');
-      const challengeFrame = page.frames().find(f => f !== page.mainFrame() && f.locator('.challenge-container .prompt-text').first().isVisible().then(() => true).catch(() => false));
-      const frameOrChallenge: any = challengeFrame || challenge;
-      logger.info('hCaptcha challenge detected');
-      try {
-        // The challenge is already rendered at this point — its asset requests fired
-        // during page load, so skip the request-quiet detection on the first pass.
-        let wait = false;
-        while (true) {
-          if (false && wait)
-            await waitForRequests(page, controller.signal);
-          // hCaptcha rebuilds its challenge (sometimes in a fresh frame) after each
-          // round — re-locate the live challenge container before every round.
-          let liveChallenge: any = null;
-          for (const f of page.frames()) {
-            if (f === page.mainFrame()) continue;
-            try {
-              const prompt = f.locator('.challenge-container .prompt-text').first();
-              if (await prompt.count() > 0 && await prompt.isVisible().catch(() => false)) {
-                liveChallenge = f.locator('.challenge-container');
-                break;
-              }
-            } catch {}
-          }
-          if (!liveChallenge)
-            liveChallenge = challenge; // fall back to the original container
-          challenge = liveChallenge;
-          const drag = (await challenge.locator('.prompt-text').first().innerText({ timeout: 15000 })).toLowerCase().includes('drag');
-          let captcha: any;
-          for (let j = 0; j < 3; j++) { // try several times because sometimes 2Captcha could return an error
-            try {
-              logger.info('Sending the CAPTCHA to 2Captcha');
-              const payload: paramsCoordinates = {
-                body: (await challenge.screenshot({ timeout: 5000 })).toString('base64'),
-                lang: process.env.BROWSER_LOCALE
-              };
-              if (drag) {
-                // Say to the worker that he needs to click
-                payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above—please be precise!';
-                payload.imginstructions = (await fs.readFile(path.join(process.cwd(), 'public', 'drag-instructions.jpg'))).toString('base64');
-              }
-              captcha = await this.solver.coordinates(payload);
-              break;
-            } catch(err: any) {
-              logger.info(err.message);
-              if (j != 2)
-                logger.info('Retrying...');
-              else
-                throw err;
-            }
-          } 
-          if (drag) {
-            const challengeBox = await challenge.boundingBox();
-            if (challengeBox == null)
-              throw new Error('.challenge-container boundingBox is null!');
-            if (captcha.data.length % 2) {
-              logger.info('Solution does not have even amount of points required for dragging. Requesting new solution...');
-              this.solver.badReport(captcha.id);
-              wait = false;
-              continue;
-            }
-            for (let i = 0; i < captcha.data.length; i += 2) {
-              const data1 = captcha.data[i];
-              const data2 = captcha.data[i+1];
-              logger.info(JSON.stringify(data1) + JSON.stringify(data2));
-              await page.mouse.move(challengeBox.x + +data1.x, challengeBox.y + +data1.y);
-              await page.mouse.down();
-              await sleep(1.1); // wait for the piece to be 'unlocked'
-              await page.mouse.move(challengeBox.x + +data2.x, challengeBox.y + +data2.y, { steps: 30 });
-              await page.mouse.up();
-            }
-            wait = true;
-          } else {
-            // Use real mouse events (move → press → release) at page-level coordinates.
-            // hCaptcha rejects synthetic locator clicks with no mouse trajectory, which
-            // made every solved round silently fail and never submit.
-            const box = await challenge.boundingBox();
-            if (box == null)
-              throw new Error('.challenge-container boundingBox is null!');
-            for (const data of captcha.data) {
-              logger.info(data);
-              const x = box.x + +data.x;
-              const y = box.y + +data.y;
-              await page.mouse.move(x - 8, y - 6, { steps: 12 });
-              await page.mouse.move(x, y, { steps: 6 });
-              await page.mouse.down();
-              await sleep(0.12, 0.3);
-              await page.mouse.up();
-              await sleep(0.25, 0.5);
-            };
-          }
-          // Submit. In Suno's proxied hCaptcha the submit control can live outside
-          // .challenge-container (and disappears once the challenge is accepted),
-          // so look in the whole frame and tolerate an already-submitted state.
-          const submit = (challenge.frame ? challenge.frame() : frameOrChallenge).locator('.button-submit').first();
-          try {
-            await this.click(submit);
-          } catch (e: any) {
-            if (e.message.includes('viewport')) // when hCaptcha window has been closed due to inactivity,
-              this.click(button); // click the Create button again to trigger the CAPTCHA
-            else if (e.message.includes('Timeout')) {
-              // Submit control never appeared — likely the challenge round was
-              // auto-accepted (single-round) or already moved on. Keep waiting for
-              // the generate/v2 interception instead of dying.
-              logger.info('Submit button not present; waiting for challenge outcome');
-            } else
-              throw e;
-          }
-        }
-      } catch(e: any) {
-        if (e.message.includes('been closed') // catch error when closing the browser
-          || e.message == 'AbortError') // catch error when waitForRequests is aborted
-          resolve();
-        else
-          reject(e);
-      }
-    }).catch(e => {
-      browser.browser()?.close();
-      throw e;
     });
-    return (new Promise((resolve, reject) => {
-      // Race 1: the browser flow above completes and generate/v2 fires with the token
-      page.route('**/api/generate/v2-web/**', async (route: any) => {
-        try {
-          const request = route.request();
-          const token = request.postDataJSON().token;
-          if (!token) {
-            // generate was attempted without a captcha token — let Suno's UI latch the
-            // hCaptcha fallback and continue waiting; do not abort the route.
-            route.continue().catch(() => {});
-            return;
-          }
-          logger.info('Captcha token received from browser flow. Closing browser');
-          route.abort();
-          browser.browser()?.close();
-          controller.abort();
-          this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          resolve(token);
-        } catch(err) {
-          reject(err);
-        }
-      });
+    for (let i = 0; i < 60 && !pageAuthHeader; i++)
+      await sleep(2, 2);
+    if (!pageAuthHeader)
+      throw new Error('Page never made an authenticated studio-api call — session cookies may be stale');
 
-      // Race 2: if neither Turnstile auto-solve nor the hCaptcha challenge produces a
-      // generate/v2 request within 90s, solve Turnstile via 2Captcha (through the
-      // proxy, so the token is IP-bound) and INJECT it into the page: Suno's own
-      // frontend then submits generate/v2-web with its own session cookies —
-      // the only combination Suno validates successfully.
-      const turnstileFallback = setTimeout(async () => {
-        try {
-          const token = await this.solveTurnstileVia2Captcha();
-          if (!token) return;
-          logger.info('Injecting 2Captcha Turnstile token into the page');
-          const injected = await page.evaluate((tok) => {
-            return new Promise<string>((res) => {
-              const w = window as any;
-              // Suno stores a global resolver for the generation widget flow
-              if (w.turnstileResolve) {
-                w.turnstileResolve({ status: 'success', token: tok });
-                res('resolve-hook');
-                return;
-              }
-              // Fallback: find the widget's hidden input / response field and set it
-              const input = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
-              if (input) {
-                input.value = tok;
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                res('input-inject');
-                return;
-              }
-              res('no-target');
-            });
-          }, token).catch(() => 'eval-failed');
-          if (injected === 'no-target' || injected === 'eval-failed') {
-            logger.info('Turnstile injection target not found (' + injected + '); resolving with raw token');
-            controller.abort();
-            browser.browser()?.close().catch(() => {});
-            resolve(token);
-            return;
-          }
-          logger.info('Turnstile token injected (' + injected + '); waiting for Suno to submit generate');
-          // The page now submits generate/v2-web itself; Race 1 intercepts it and
-          // resolves with the page's own token (session + IP consistent).
-        } catch (e: any) {
-          logger.info('2Captcha Turnstile fallback failed: ' + e.message);
-        }
-      }, 90000);
-      this.pendingTurnstileTimeouts.push(turnstileFallback);
-    }));
+    // Solve Turnstile through the proxy so the token is IP-bound to our egress.
+    const token = await this.solveTurnstileVia2Captcha();
+    if (!token)
+      throw new Error('Turnstile solve failed — no token from 2Captcha');
+
+    // Build the real song payload the page will submit.
+    const songPayload: any = {
+      make_instrumental: make_instrumental,
+      mv: model || DEFAULT_MODEL,
+      generation_type: 'TEXT',
+      token
+    };
+    if (persona_id) songPayload.persona_id = persona_id;
+    if (isCustom) {
+      songPayload.tags = tags;
+      songPayload.title = title;
+      songPayload.negative_tags = negative_tags;
+      songPayload.prompt = prompt;
+    } else {
+      songPayload.gpt_description_prompt = prompt;
+    }
+    logger.info('Firing in-page generate with payload keys: ' + Object.keys(songPayload).join(','));
+
+    const result = await page.evaluate(async ({ body, auth }: { body: any, auth: string | null }) => {
+      const r = await fetch('https://studio-api.prod.suno.com/api/generate/v2-web/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(auth ? { 'Authorization': auth } : {}) },
+        credentials: 'include',
+        body: JSON.stringify(body)
+      });
+      const text = await r.text();
+      return { status: r.status, body: text };
+    }, { body: songPayload, auth: pageAuthHeader }).catch((e: any) => {
+      // Navigation can destroy the execution context mid-evaluate; retry once on a
+      // fresh evaluation after the page settles.
+      logger.info('page.evaluate failed (' + e.message + '), retrying once');
+      return page.evaluate(async ({ body, auth }: { body: any, auth: string | null }) => {
+        const r = await fetch('https://studio-api.prod.suno.com/api/generate/v2-web/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(auth ? { 'Authorization': auth } : {}) },
+          credentials: 'include',
+          body: JSON.stringify(body)
+        });
+        const text = await r.text();
+        return { status: r.status, body: text };
+      }, { body: songPayload, auth: pageAuthHeader });
+    });
+
+    if (result.status !== 200) {
+      browser.browser()?.close().catch(() => {});
+      throw new Error(`In-page generate HTTP ${result.status}: ${result.body.slice(0, 200)}`);
+    }
+
+    // Capture the page's JWT for follow-up polling, close the browser, and return
+    // the raw response JSON to the caller (generateSongs parses clips from it).
+    this.currentToken = pageAuthHeader!.replace('Bearer ', '');
+    browser.browser()?.close().catch(() => {});
+    logger.info('In-page generation flow complete');
+    return result.body;
   }
 
   /**
@@ -635,16 +427,6 @@ class SunoApi {
       host: u.hostname,
       port
     };
-  }
-
-  /**
-   * Imitates Cloudflare Turnstile loading error. Unused right now, left for future
-   */
-  private async getTurnstile() {
-    return this.client.post(
-      `https://clerk.suno.com/v1/client?__clerk_api_version=2021-02-05&_clerk_js_version=${SunoApi.CLERK_VERSION}&_method=PATCH`,
-      { captcha_error: '300030,300030,300030' },
-      { headers: { 'content-type': 'application/x-www-form-urlencoded' } });
   }
 
   /**
@@ -779,55 +561,65 @@ class SunoApi {
     persona_id?: string
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
-    const payload: any = {
-      make_instrumental: make_instrumental,
-      mv: model || DEFAULT_MODEL,
-      prompt: '',
-      generation_type: 'TEXT',
-      continue_at: continue_at,
-      continue_clip_id: continue_clip_id,
-      task: task,
-      token: await this.getCaptcha()
-    };
-    if (persona_id) {
-      payload.persona_id = persona_id;
-    }
-    if (isCustom) {
-      payload.tags = tags;
-      payload.title = title;
-      payload.negative_tags = negative_tags;
-      payload.prompt = prompt;
+    let clips: any[];
+    if (await this.captchaRequired()) {
+      // Flagged account: run the whole generation inside the real browser page.
+      // getCaptcha fires the actual generate POST in-page and returns its raw
+      // 200 response body.
+      const rawBody = await this.getCaptcha(prompt, isCustom, tags, title, make_instrumental, model, negative_tags, persona_id);
+      clips = JSON.parse(rawBody!).clips;
     } else {
-      payload.gpt_description_prompt = prompt;
-    }
-    logger.info(
-      'generateSongs payload:\n' +
-        JSON.stringify(
-          {
-            prompt: prompt,
-            isCustom: isCustom,
-            tags: tags,
-            title: title,
-            make_instrumental: make_instrumental,
-            wait_audio: wait_audio,
-            negative_tags: negative_tags,
-            payload: payload
-          },
-          null,
-          2
-        )
-    );
-    const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/v2-web/`,
-      payload,
-      {
-        timeout: 10000 // 10 seconds timeout
+      const payload: any = {
+        make_instrumental: make_instrumental,
+        mv: model || DEFAULT_MODEL,
+        prompt: '',
+        generation_type: 'TEXT',
+        continue_at: continue_at,
+        continue_clip_id: continue_clip_id,
+        task: task,
+        token: null
+      };
+      if (persona_id) {
+        payload.persona_id = persona_id;
       }
-    );
-    if (response.status !== 200) {
-      throw new Error('Error response:' + response.statusText);
+      if (isCustom) {
+        payload.tags = tags;
+        payload.title = title;
+        payload.negative_tags = negative_tags;
+        payload.prompt = prompt;
+      } else {
+        payload.gpt_description_prompt = prompt;
+      }
+      logger.info(
+        'generateSongs payload:\n' +
+          JSON.stringify(
+            {
+              prompt: prompt,
+              isCustom: isCustom,
+              tags: tags,
+              title: title,
+              make_instrumental: make_instrumental,
+              wait_audio: wait_audio,
+              negative_tags: negative_tags,
+              payload: payload
+            },
+            null,
+            2
+          )
+      );
+      const response = await this.client.post(
+        `${SunoApi.BASE_URL}/api/generate/v2-web/`,
+        payload,
+        {
+          timeout: 10000 // 10 seconds timeout
+        }
+      );
+      if (response.status !== 200) {
+        throw new Error('Error response:' + response.statusText);
+      }
+      clips = response.data.clips;
     }
-    const songIds = response.data.clips.map((audio: any) => audio.id);
+    const songIds = clips.map((audio: any) => audio.id);
     //Want to wait for music file generation
     if (wait_audio) {
       const startTime = Date.now();
@@ -848,7 +640,7 @@ class SunoApi {
       }
       return lastResponse;
     } else {
-      return response.data.clips.map((audio: any) => ({
+      return clips.map((audio: any) => ({
         id: audio.id,
         title: audio.title,
         image_url: audio.image_url,
