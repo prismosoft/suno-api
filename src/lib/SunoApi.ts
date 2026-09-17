@@ -347,7 +347,7 @@ class SunoApi {
     }
     logger.info('Firing in-page generate with payload keys: ' + Object.keys(songPayload).join(','));
 
-    const result = await page.evaluate(async ({ body, auth }: { body: any, auth: string | null }) => {
+    const fireGenerate = (auth: string | null) => page.evaluate(async ({ body, auth }: { body: any, auth: string | null }) => {
       const r = await fetch('https://studio-api.prod.suno.com/api/generate/v2-web/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(auth ? { 'Authorization': auth } : {}) },
@@ -356,21 +356,33 @@ class SunoApi {
       });
       const text = await r.text();
       return { status: r.status, body: text };
-    }, { body: songPayload, auth: pageAuthHeader }).catch((e: any) => {
-      // Navigation can destroy the execution context mid-evaluate; retry once on a
-      // fresh evaluation after the page settles.
-      logger.info('page.evaluate failed (' + e.message + '), retrying once');
-      return page.evaluate(async ({ body, auth }: { body: any, auth: string | null }) => {
-        const r = await fetch('https://studio-api.prod.suno.com/api/generate/v2-web/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(auth ? { 'Authorization': auth } : {}) },
-          credentials: 'include',
-          body: JSON.stringify(body)
+    }, { body: songPayload, auth });
+    let result = { status: 0, body: '' };
+    // The page can navigate (client-side router) and destroy the execution context
+    // mid-fetch; retry up to 3 times, re-capturing the auth header each time and
+    // giving the router a moment to settle.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        result = await fireGenerate(pageAuthHeader);
+        break;
+      } catch (e: any) {
+        logger.info(`page.evaluate attempt ${attempt} failed (${e.message})`);
+        if (attempt === 3) {
+          browser.browser()?.close().catch(() => {});
+          throw new Error('In-page generate failed after 3 attempts: ' + e.message);
+        }
+        await sleep(5, 8);
+        pageAuthHeader = null;
+        page.on('request', (r: any) => {
+          if (r.url().includes('studio-api') && !pageAuthHeader) {
+            const a = r.headers()['authorization'];
+            if (a) pageAuthHeader = a;
+          }
         });
-        const text = await r.text();
-        return { status: r.status, body: text };
-      }, { body: songPayload, auth: pageAuthHeader });
-    });
+        for (let i = 0; i < 30 && !pageAuthHeader; i++)
+          await sleep(2, 2);
+      }
+    }
 
     if (result.status !== 200) {
       browser.browser()?.close().catch(() => {});
