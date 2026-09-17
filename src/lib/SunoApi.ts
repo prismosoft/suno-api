@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import axios, { AxiosInstance } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import UserAgent from 'user-agents';
@@ -994,6 +995,69 @@ class SunoApi {
       }
     }
     throw lastError;
+  }
+
+  /**
+   * Fetches a clip's encrypted CDN media and returns it decrypted (raw MP4/Opus bytes).
+   * Scheme (reverse-engineered from suno.com web player, verified live):
+   *   1. POST /api/mango/rights {content_params:{content_id, content_type:'clip'}} -> {key, iv} (base64-wrapped AES-GCM)
+   *   2. userKey = SHA-256(<JWT>)
+   *   3. content key/iv = AES-256-GCM decrypt of wrapped payload (iv=payload[0:12], aad=clip id, tag=payload[-16:])
+   *   4. media = AES-128-CTR with 16-byte counter block = decoded iv (big-endian incrementing)
+   */
+  public async decryptClipMedia(clipId: string): Promise<Buffer> {
+    await this.keepAlive(false);
+
+    const token = this.currentToken;
+    if (!token) throw new Error('decryptClipMedia: no auth token available');
+
+    const rightsResp = await this.client.post(`${SunoApi.BASE_URL}/api/mango/rights`, {
+      content_params: { content_id: clipId, content_type: 'clip' }
+    }, { timeout: 15000 });
+    const rights = rightsResp.data;
+    if (!rights?.key || !rights?.iv) throw new Error('decryptClipMedia: rights response missing key/iv');
+
+    const userKey = crypto.createHash('sha256').update(token).digest();
+
+    const unwrap = (wrapB64: string): Buffer => {
+      const payload = Buffer.from(wrapB64, 'base64');
+      const iv = payload.subarray(0, 12);
+      const ct = payload.subarray(12);
+      const tag = ct.subarray(ct.length - 16);
+      const body = ct.subarray(0, ct.length - 16);
+      const d = crypto.createDecipheriv('aes-256-gcm', userKey, iv, { authTagLength: 16 });
+      d.setAAD(Buffer.from(clipId));
+      d.setAuthTag(tag);
+      return Buffer.concat([d.update(body), d.final()]);
+    };
+
+    const key = unwrap(rights.key);
+    const iv = unwrap(rights.iv);
+    if (key.length !== 16) throw new Error('decryptClipMedia: unexpected content key length ' + key.length);
+
+    const mediaResp = await this.client.get(
+      `https://d2lwuy8qc234o3.cloudfront.net/1/clip/${clipId}.m4a`,
+      { responseType: 'arraybuffer', timeout: 300000 }
+    );
+    const enc = Buffer.from(mediaResp.data);
+
+    const out = Buffer.alloc(enc.length);
+    const BLOCKS_PER_CHUNK = 4096;
+    let done = 0;
+    let blockIdx = 0n;
+    while (done < enc.length) {
+      const chunk = Math.min(16 * BLOCKS_PER_CHUNK, enc.length - done);
+      const ctr = Buffer.from(iv);
+      let n = 0n;
+      for (let i = 0; i < 16; i++) n = (n << 8n) | BigInt(ctr[i]);
+      n += blockIdx;
+      for (let i = 15; i >= 0; i--) { ctr[i] = Number(n & 255n); n >>= 8n; }
+      const d = crypto.createDecipheriv('aes-128-ctr', key, ctr);
+      d.update(enc.subarray(done, done + chunk)).copy(out, done);
+      done += chunk;
+      blockIdx += BigInt(BLOCKS_PER_CHUNK);
+    }
+    return out;
   }
 }
 
