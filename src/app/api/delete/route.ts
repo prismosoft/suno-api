@@ -5,14 +5,16 @@ import { corsHeaders } from "@/lib/utils";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
+  let ids: string[] = [];
+  let trash = true;
   try {
     const body = await req.json();
-    const ids: string[] = Array.isArray(body.ids)
+    ids = Array.isArray(body.ids)
       ? body.ids
       : body.id
         ? [body.id]
         : [];
-    const trash = body.trash !== false;
+    trash = body.trash !== false;
 
     if (!ids.length || ids.some((i) => !i)) {
       return new NextResponse(
