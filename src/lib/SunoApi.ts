@@ -36,6 +36,7 @@ export interface AudioInfo {
   negative_tags?: string; // Negative tags of music.
   duration?: string; // Duration of the audio
   error_message?: string; // Error message if any
+  media_url?: string; // Direct playable CDN url (m4a)
 }
 
 interface PersonaResponse {
@@ -828,7 +829,8 @@ class SunoApi {
       type: audio.metadata.type,
       tags: audio.metadata.tags,
       duration: audio.metadata.duration,
-      error_message: audio.metadata.error_message
+      error_message: audio.metadata.error_message,
+      media_url: (audio.media_urls || []).find((m: any) => (m.content_type || '').startsWith('audio'))?.url || ''
     }));
   }
 
