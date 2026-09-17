@@ -954,6 +954,47 @@ class SunoApi {
     }
     throw lastError;
   }
+
+  /**
+   * Trashes or restores one or more clips in the Suno account/library.
+   * Route + body verified live: `POST /api/gen/trash` with
+   * `{"clip_ids": [...], "trash": boolean}` → `{"ids": [...], "is_trashed": boolean}`.
+   * The older `/api/feed/trash` + `{"ids": [...]}` variant is kept as fallback.
+   * @param clipIds One or more clip IDs to trash/restore.
+   * @param trash true to move clips to trash (delete), false to restore them.
+   */
+  public async deleteClips(clipIds: string[], trash: boolean = true): Promise<any> {
+    await this.keepAlive(false);
+
+    const ids = clipIds.filter(Boolean);
+    if (!ids.length) {
+      throw new Error('deleteClips: no clip IDs provided');
+    }
+
+    const variants: Array<{ method: string; url: string; body?: any }> = [
+      { method: 'post', url: `${SunoApi.BASE_URL}/api/gen/trash`, body: { clip_ids: ids, trash } },
+      { method: 'post', url: `${SunoApi.BASE_URL}/api/feed/trash`, body: { ids, trash } }
+    ];
+
+    let lastError: any;
+    for (const variant of variants) {
+      try {
+        const response = await this.client.request({
+          method: variant.method,
+          url: variant.url,
+          data: variant.body,
+          timeout: 10000
+        });
+        if (response.status === 200) return response.data;
+        lastError = new Error('Error response: ' + response.statusText);
+      } catch (err: any) {
+        lastError = err;
+        if (err.response?.status === 404 || err.response?.status === 405) continue;
+        throw err;
+      }
+    }
+    throw lastError;
+  }
 }
 
 export const sunoApi = async (cookie?: string) => {
