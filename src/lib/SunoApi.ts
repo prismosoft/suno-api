@@ -546,23 +546,49 @@ class SunoApi {
       });
 
       // Race 2: if neither Turnstile auto-solve nor the hCaptcha challenge produces a
-      // generate/v2 request within 5 minutes, solve Turnstile out-of-band via 2Captcha
-      // and resolve with that token. The deadline is generous on purpose: the in-page
-      // hCaptcha loop (session-bound, the only token Suno accepts from us) can take
-      // several human-solved rounds.
+      // generate/v2 request within 90s, solve Turnstile via 2Captcha (through the
+      // proxy, so the token is IP-bound) and INJECT it into the page: Suno's own
+      // frontend then submits generate/v2-web with its own session cookies —
+      // the only combination Suno validates successfully.
       const turnstileFallback = setTimeout(async () => {
         try {
           const token = await this.solveTurnstileVia2Captcha();
-          if (token) {
-            logger.info('Turnstile solved via 2Captcha. Closing browser');
+          if (!token) return;
+          logger.info('Injecting 2Captcha Turnstile token into the page');
+          const injected = await page.evaluate((tok) => {
+            return new Promise<string>((res) => {
+              const w = window as any;
+              // Suno stores a global resolver for the generation widget flow
+              if (w.turnstileResolve) {
+                w.turnstileResolve({ status: 'success', token: tok });
+                res('resolve-hook');
+                return;
+              }
+              // Fallback: find the widget's hidden input / response field and set it
+              const input = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+              if (input) {
+                input.value = tok;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                res('input-inject');
+                return;
+              }
+              res('no-target');
+            });
+          }, token).catch(() => 'eval-failed');
+          if (injected === 'no-target' || injected === 'eval-failed') {
+            logger.info('Turnstile injection target not found (' + injected + '); resolving with raw token');
             controller.abort();
             browser.browser()?.close().catch(() => {});
             resolve(token);
+            return;
           }
+          logger.info('Turnstile token injected (' + injected + '); waiting for Suno to submit generate');
+          // The page now submits generate/v2-web itself; Race 1 intercepts it and
+          // resolves with the page's own token (session + IP consistent).
         } catch (e: any) {
           logger.info('2Captcha Turnstile fallback failed: ' + e.message);
         }
-      }, 300000);
+      }, 90000);
       this.pendingTurnstileTimeouts.push(turnstileFallback);
     }));
   }
