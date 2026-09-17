@@ -830,7 +830,7 @@ class SunoApi {
       tags: audio.metadata.tags,
       duration: audio.metadata.duration,
       error_message: audio.metadata.error_message,
-      media_url: (audio.media_urls || []).find((m: any) => (m.content_type || '').startsWith('audio'))?.url || ''
+      media_url: (audio.media_urls || []).find((m: any) => (m.content_type || '').startsWith('audio') || (m.url || '').includes('cloudfront'))?.url || ''
     }));
   }
 
