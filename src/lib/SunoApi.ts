@@ -1064,6 +1064,62 @@ class SunoApi {
     }
     return out;
   }
+
+  /**
+   * Returns the URL of Suno's ORIGINAL WAV file for a clip (no transcoding).
+   * Flow reverse-engineered from the suno.com desktop "Download → WAV" flow:
+   *   1. POST /api/billing/clips/{id}/download/ — charges one download credit
+   *      (idempotent when the WAV is already cached server-side)
+   *   2. POST /api/gen/{id}/convert_wav/ — queues the server-side conversion
+   *      (idempotent; skips if already converted)
+   *   3. Poll GET /api/gen/{id}/wav_file/ → { wav_file_url }
+   * NOTE: WAV is a paid-plan download and consumes a download credit per clip.
+   */
+  public async getWavFileUrl(clipId: string, timeoutSeconds: number = 120, pollSeconds: number = 3): Promise<string> {
+    await this.keepAlive(false);
+
+    try {
+      await this.client.post(
+        `${SunoApi.BASE_URL}/api/billing/clips/${clipId}/download/`,
+        {},
+        { timeout: 15000 }
+      );
+    } catch (err: any) {
+      // Non-fatal: an already-charged/available WAV may reject the billing call.
+      logger.warn(`billing/clips/${clipId}/download/ -> ${err?.response?.status || err?.message}`);
+    }
+
+    try {
+      await this.client.post(
+        `${SunoApi.BASE_URL}/api/gen/${clipId}/convert_wav/`,
+        {},
+        { timeout: 15000 }
+      );
+    } catch (err: any) {
+      logger.warn(`gen/${clipId}/convert_wav/ -> ${err?.response?.status || err?.message}`);
+    }
+
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    let lastError: any = null;
+    while (Date.now() < deadline) {
+      try {
+        const resp = await this.client.get(
+          `${SunoApi.BASE_URL}/api/gen/${clipId}/wav_file/`,
+          { timeout: 15000 }
+        );
+        const url = resp.data?.wav_file_url;
+        if (url) return url;
+      } catch (err: any) {
+        lastError = err;
+        if (err?.response?.status === 401 || err?.response?.status === 403) throw err;
+      }
+      await sleep(pollSeconds, pollSeconds);
+    }
+    throw new Error(
+      `WAV conversion for clip ${clipId} did not complete within ${timeoutSeconds}s` +
+      (lastError ? ` (last error: ${lastError?.response?.status || lastError?.message})` : '')
+    );
+  }
 }
 
 export const sunoApi = async (cookie?: string) => {
