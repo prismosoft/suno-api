@@ -53,6 +53,8 @@ export async function POST(req: NextRequest) {
     delete fwdHeaders["Content-Length"];
     delete fwdHeaders["content-length"];
     const bodyBuf = spec.bodyB64 ? Buffer.from(spec.bodyB64, "base64") : null;
+    // S3 (and other strict servers) reject chunked uploads — always send an explicit Content-Length for a fully-buffered body
+    if (bodyBuf) fwdHeaders["Content-Length"] = String(bodyBuf.length);
 
     const result = await new Promise<any>((resolve, reject) => {
       const httpReq = https.request(
