@@ -11,7 +11,7 @@ export const maxDuration = 300;
  * residential proxy (SUNO_PROXY_URL) and returns the raw response.
  *
  * Spec (JSON body):
- *   { method: "GET"|"POST"|..., url: "https://...", headers?: {...}, bodyB64?: "<base64>" }
+ *   { method: "GET"|"POST"|..., url: "https://...", headers?: {...}, bodyB64?: "<base64>", direct?: true }
  *
  * Response:
  *   { statusCode, statusMessage, headers (incl. set-cookie), bodyB64 }
@@ -46,7 +46,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "private/internal hosts not allowed" }, { status: 403 });
     }
 
-    const agent = new HttpsProxyAgent(PROXY_URL);
+    // direct:true skips the residential proxy (e.g. large S3 uploads: S3 accepts datacenter IPs and the proxy uplink is too slow)
+    const agent = spec.direct === true ? undefined : new HttpsProxyAgent(PROXY_URL);
     const fwdHeaders: Record<string, string> = { ...(spec.headers || {}) };
     delete fwdHeaders["Host"];
     delete fwdHeaders["host"];
