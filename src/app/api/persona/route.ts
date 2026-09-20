@@ -22,8 +22,13 @@ export async function GET(req: NextRequest) {
         });
       }
 
+      // ?detail=1 returns the persona record itself (persona_type, root_clip_id) rather than
+      // its clips — that is what decides how a generation has to reference the voice.
+      const api = await sunoApi((await cookies()).toString());
       const pageNumber = page ? parseInt(page) : 1;
-      const personaInfo = await (await sunoApi((await cookies()).toString())).getPersonaPaginated(personaId, pageNumber);
+      const personaInfo = url.searchParams.get('detail')
+        ? await api.getPersona(personaId)
+        : await api.getPersonaPaginated(personaId, pageNumber);
 
       return new NextResponse(JSON.stringify(personaInfo), {
         status: 200,

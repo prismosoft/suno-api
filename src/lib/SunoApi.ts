@@ -20,6 +20,11 @@ globalForSunoApi.sunoApiCache = cache;
 const logger = pino();
 export const DEFAULT_MODEL = 'chirp-hawk'; // Suno v6
 
+// Suno uses an all-zero uuid for clips you are not allowed to reference.
+const EMPTY_UUID = '00000000-0000-0000-0000-000000000000';
+const isValidClipId = (id: unknown): id is string =>
+  typeof id === 'string' && id.length > 0 && id !== EMPTY_UUID;
+
 export interface AudioInfo {
   id: string; // Unique identifier for the audio
   title?: string; // Title of the audio
@@ -338,7 +343,10 @@ class SunoApi {
       generation_type: 'TEXT',
       token
     };
-    if (persona_id) songPayload.persona_id = persona_id;
+    if (persona_id) {
+      Object.assign(songPayload, await this.buildPersonaFields(persona_id));
+      songPayload.metadata = { ...(songPayload.metadata || {}), is_remix: true };
+    }
     if (isCustom) {
       songPayload.tags = tags;
       songPayload.title = title;
@@ -594,7 +602,8 @@ class SunoApi {
         token: null
       };
       if (persona_id) {
-        payload.persona_id = persona_id;
+        Object.assign(payload, await this.buildPersonaFields(persona_id, task));
+        payload.metadata = { ...(payload.metadata || {}), is_remix: true };
       }
       if (isCustom) {
         payload.tags = tags;
@@ -859,6 +868,69 @@ class SunoApi {
       monthly_limit: response.data.monthly_limit,
       monthly_usage: response.data.monthly_usage
     };
+  }
+
+  /**
+   * Fetches a persona record, including the persona_type the generate payload depends on.
+   * @param personaId The persona ID.
+   */
+  public async getPersona(personaId: string): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.get(
+      `${SunoApi.BASE_URL}/api/persona/get-persona/${personaId}/`,
+      { timeout: 10000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Builds the generate-payload fields that actually apply a persona's voice.
+   *
+   * Sending `persona_id` on its own is NOT enough: the endpoint accepts the request, bills
+   * the credits and returns clips with no persona attached at all. Suno's own web client
+   * treats a persona as a *reference*, which means the payload must also carry the task the
+   * reference implies (`vox` for a vox persona, `artist_consistency` for a legacy one), the
+   * source clip the voice is taken from, and override_fields so our lyrics and tags win over
+   * the root clip's. This mirrors getGeneratePayload in the web client.
+   *
+   * @param persona_id The persona to sing the song.
+   * @returns The payload fragment to merge into a generate request.
+   */
+  private async buildPersonaFields(persona_id: string, task?: string): Promise<Record<string, any>> {
+    const persona = await this.getPersona(persona_id);
+    const isVox = persona?.persona_type === 'vox';
+    const rootClipId = persona?.root_clip_id;
+
+    // A vox persona can legitimately have no shareable root clip; any other persona without
+    // one cannot be applied at all, and Suno would silently ignore it rather than say so.
+    if (!isValidClipId(rootClipId) && !isVox) {
+      throw new Error(
+        'Persona ' + persona_id + ' has no usable root clip (' + rootClipId + ') — its source song is private or deleted, so its voice cannot be applied.'
+      );
+    }
+
+    // The task encodes both the persona flavour and whatever else the request is doing;
+    // extending an existing clip with a persona is its own task, not a persona-only one.
+    const personaTask = task === 'extend'
+      ? (isVox ? 'vox_extend' : 'artist_extend')
+      : (isVox ? 'vox' : 'artist_consistency');
+
+    const fields: Record<string, any> = {
+      persona_id,
+      task: personaTask,
+      artist_start_s: null,
+      artist_end_s: null,
+      // our prompt and tags must beat the ones inherited from the persona's root clip
+      override_fields: ['prompt', 'tags']
+    };
+    if (isValidClipId(rootClipId)) {
+      fields.artist_clip_id = rootClipId;
+    }
+    logger.info('Applying persona ' + persona_id + ' as task=' + fields.task + ' artist_clip_id=' + (fields.artist_clip_id || '(none)'));
+    return fields;
   }
 
   public async getPersonaPaginated(personaId: string, page: number = 1): Promise<PersonaResponse> {
