@@ -166,6 +166,34 @@ export async function coverToJpeg(cover: CoverArt): Promise<CoverArt> {
   }
 }
 
+/**
+ * Square cover art normalized to an exact pixel size.
+ *
+ * Release artwork has to be 3000x3000, and no image model on Runware renders that directly --
+ * they cap total pixels well below it (Qwen-Image at 2048x2048, gpt-image at 2880x2880), so the
+ * final size is always reached here rather than at generation time. Lanczos is used instead of
+ * ffmpeg's default bicubic because this is usually an upscale and bicubic visibly softens edges
+ * and lettering.
+ */
+export async function resizeCover(cover: CoverArt, size = 3000, format: "png" | "jpeg" = "png"): Promise<CoverArt> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cover-"));
+  try {
+    const inC = path.join(dir, "in");
+    const out = path.join(dir, format === "png" ? "out.png" : "out.jpg");
+    await fs.writeFile(inC, cover.data);
+    const args = ["-hide_banner", "-y", "-i", inC, "-vf", `scale=${size}:${size}:flags=lanczos`];
+    // Release artwork is opaque; keeping an alpha channel only inflates the PNG and risks
+    // stores rejecting it. rgb24 is lossless here, just without the unused channel.
+    if (format === "png") args.push("-pix_fmt", "rgb24");
+    if (format === "jpeg") args.push("-q:v", "2");
+    args.push(out);
+    await run(FFMPEG(), args);
+    return { data: await fs.readFile(out), mime: format === "png" ? "image/png" : "image/jpeg" };
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
 export async function tagM4a(audio: Buffer, tags: AudioTags, cover?: CoverArt): Promise<Buffer> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tag-"));
   try {
