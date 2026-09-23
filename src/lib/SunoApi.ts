@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import axios, { AxiosInstance } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { agentFor, pickProxy } from '@/lib/proxyPool';
 import UserAgent from 'user-agents';
 import pino from 'pino';
 import yn from 'yn';
@@ -90,11 +91,19 @@ class SunoApi {
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
     this.cookies = cookie.parse(cookies);
     this.deviceId = this.cookies.ajs_anonymous_id || randomUUID();
-    // Optional outbound proxy (e.g. Proxidize sticky IP). Route all Suno API
-    // traffic through it so captcha tokens solved over the same IP bind
-    // correctly (Suno validates token + IP + session together).
-    const proxyUrl = process.env.SUNO_PROXY_URL;
-    const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+    // Optional outbound proxy (Proxidize sticky sessions). Route all Suno API traffic through
+    // ONE session for the life of this client: Suno validates captcha token + IP + session
+    // together, so an instance that changed IP mid-conversation would have its token rejected.
+    // The session is therefore picked once here, keyed on this client's device id, rather than
+    // per request — different clients still land on different IPs, which is the point of a pool.
+    let proxyAgent: HttpsProxyAgent<string> | undefined;
+    try {
+      proxyAgent = agentFor(pickProxy(this.deviceId));
+    } catch (e: any) {
+      // no pool configured, or every session blocked: go direct rather than refuse to start
+      console.warn("[SunoApi] no usable proxy:", e?.message);
+      proxyAgent = undefined;
+    }
     this.client = axios.create({
       withCredentials: true,
       ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent, proxy: false } : {}),
