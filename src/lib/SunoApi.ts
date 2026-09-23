@@ -1116,9 +1116,15 @@ class SunoApi {
     const iv = unwrap(rights.iv);
     if (key.length !== 16) throw new Error('decryptClipMedia: unexpected content key length ' + key.length);
 
-    const mediaResp = await this.client.get(
+    // The encrypted media comes off CloudFront, a public CDN GET with no Suno session
+    // semantics. Routing those bytes through the Proxidize proxy made them 504
+    // ("upstream proxy refused the connection: upstream_timeout") for 30-60s at a time,
+    // which is what broke preview building for every song. The proxy exists for
+    // suno.com API calls, where captcha token + IP + session are validated together;
+    // direct fetch of the media is measured at well under a second.
+    const mediaResp = await axios.get(
       `https://d2lwuy8qc234o3.cloudfront.net/1/clip/${clipId}.m4a`,
-      { responseType: 'stream', timeout: 300000 }
+      { responseType: 'stream', timeout: 60000 }
     );
     const enc = await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
