@@ -68,11 +68,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 5. apply as the clip cover
-    await api.setClipMetadata(clipId, { image_s3_id: `image_${upload.id}` });
+    // 5. apply as the clip cover — via image_url (the upload is already on
+    // Suno's CDN). This is the pattern sunox's recovery flow uses; image_s3_id
+    // alone was observed to no-op on set_metadata.
+    const coverUrl = `https://cdn2.suno.ai/image_${upload.id}.jpeg`;
+    await api.setClipMetadata(clipId, { image_url: coverUrl });
 
     return NextResponse.json(
-      { ok: true, clip_id: clipId, upload_id: upload.id, image_url: `https://cdn2.suno.ai/image_${upload.id}.jpeg` },
+      { ok: true, clip_id: clipId, upload_id: upload.id, image_url: coverUrl },
       { status: 200, headers: corsHeaders }
     );
   } catch (error: any) {
