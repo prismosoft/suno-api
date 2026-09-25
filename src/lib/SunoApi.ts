@@ -1098,10 +1098,11 @@ class SunoApi {
       { update_type: 'add', metadata: { clip_ids: ids } },
       { timeout: 15000 }
     );
-    if (response.status !== 200) {
+    // Suno answers 204 No Content on success (and for an already-filed clip).
+    if (response.status < 200 || response.status >= 300) {
       throw new Error('Error response: ' + response.statusText);
     }
-    return response.data;
+    return response.data ?? { ok: true };
   }
 
   /**
@@ -1133,7 +1134,7 @@ class SunoApi {
           data: variant.body,
           timeout: 15000
         });
-        if (response.status === 200) return response.data;
+        if (response.status >= 200 && response.status < 300) return response.data ?? { ok: true };
         lastError = new Error('Error response: ' + response.statusText);
       } catch (err: any) {
         lastError = err;
@@ -1253,10 +1254,10 @@ class SunoApi {
       {},
       { timeout: 15000 }
     );
-    if (response.status !== 200) {
+    if (response.status < 200 || response.status >= 300) {
       throw new Error('Error response: ' + response.statusText);
     }
-    return response.data;
+    return response.data ?? { ok: true };
   }
 
   /**
@@ -1275,10 +1276,10 @@ class SunoApi {
       fields,
       { timeout: 15000 }
     );
-    if (response.status !== 200) {
+    if (response.status < 200 || response.status >= 300) {
       throw new Error('Error response: ' + response.statusText);
     }
-    return response.data;
+    return response.data ?? { ok: true };
   }
 
   /**
