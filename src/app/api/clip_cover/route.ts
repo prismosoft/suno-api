@@ -68,14 +68,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 5. apply as the clip cover — via image_url (the upload is already on
-    // Suno's CDN). This is the pattern sunox's recovery flow uses; image_s3_id
-    // alone was observed to no-op on set_metadata.
-    const coverUrl = `https://cdn2.suno.ai/image_${upload.id}.jpeg`;
-    await api.setClipMetadata(clipId, { image_url: coverUrl });
+    // 5. apply as the clip cover via set_metadata with the cover_image shape
+    // (the live-verified pattern), and surface Suno's response verbatim so the
+    // caller sees exactly what was applied.
+    const applied = await api.setClipMetadata(clipId, {
+      cover_image: { id: `image_${upload.id}`, type: "generated" },
+      cover_art_session_id: finish?.session_id || upload.id,
+    });
 
     return NextResponse.json(
-      { ok: true, clip_id: clipId, upload_id: upload.id, image_url: coverUrl },
+      { ok: true, clip_id: clipId, upload_id: upload.id, applied },
       { status: 200, headers: corsHeaders }
     );
   } catch (error: any) {
