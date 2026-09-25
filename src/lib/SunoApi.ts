@@ -1079,6 +1079,209 @@ class SunoApi {
   }
 
   /**
+   * Files clips into a Suno workspace (internally a "project").
+   * Route + body per the live-confirmed web contract: after a create, the web
+   * app files the new clips with `POST /api/project/{workspace_id}/clips` —
+   * the generate request itself carries no workspace field.
+   * @param workspaceId The workspace (project) ID.
+   * @param clipIds One or more clip IDs to file.
+   */
+  public async addToProject(workspaceId: string, clipIds: string[]): Promise<any> {
+    await this.keepAlive(false);
+
+    const ids = clipIds.filter(Boolean);
+    if (!workspaceId) throw new Error('addToProject: no workspace ID provided');
+    if (!ids.length) throw new Error('addToProject: no clip IDs provided');
+
+    const response = await this.client.post(
+      `${SunoApi.BASE_URL}/api/project/${workspaceId}/clips`,
+      { update_type: 'add', metadata: { clip_ids: ids } },
+      { timeout: 15000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Adds clips to a playlist.
+   * Route + body per bundle-confirmed evidence (sunox): `POST /api/playlist/v2/{id}/tracks/add`
+   * with `{"clip_ids": [...]}`. The legacy variant `POST /api/playlist/update_clips/` is kept
+   * as fallback for schema drift.
+   * @param playlistId The playlist ID.
+   * @param clipIds One or more clip IDs to add.
+   */
+  public async addToPlaylist(playlistId: string, clipIds: string[]): Promise<any> {
+    await this.keepAlive(false);
+
+    const ids = clipIds.filter(Boolean);
+    if (!playlistId) throw new Error('addToPlaylist: no playlist ID provided');
+    if (!ids.length) throw new Error('addToPlaylist: no clip IDs provided');
+
+    const variants: Array<{ method: string; url: string; body?: any }> = [
+      { method: 'post', url: `${SunoApi.BASE_URL}/api/playlist/v2/${playlistId}/tracks/add`, body: { clip_ids: ids } },
+      { method: 'post', url: `${SunoApi.BASE_URL}/api/playlist/update_clips/`, body: { playlist_id: playlistId, update_type: 'add', metadata: { clip_ids: ids } } }
+    ];
+
+    let lastError: any;
+    for (const variant of variants) {
+      try {
+        const response = await this.client.request({
+          method: variant.method,
+          url: variant.url,
+          data: variant.body,
+          timeout: 15000
+        });
+        if (response.status === 200) return response.data;
+        lastError = new Error('Error response: ' + response.statusText);
+      } catch (err: any) {
+        lastError = err;
+        if (err.response?.status === 404 || err.response?.status === 405) continue;
+        throw err;
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * Lists the account's own playlists (reads, for verification/backfill).
+   * GET /api/playlist/me?page={page}
+   */
+  public async getMyPlaylists(page: number = 1): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.get(
+      `${SunoApi.BASE_URL}/api/playlist/me`,
+      { params: { page }, timeout: 15000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Fetches one playlist with its ordered clips (readback / membership checks).
+   * GET /api/playlist/v2/{playlist_id}
+   */
+  public async getPlaylistV2(playlistId: string): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.get(
+      `${SunoApi.BASE_URL}/api/playlist/v2/${playlistId}`,
+      { timeout: 15000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Lists the account's workspaces (projects) (reads for verification/backfill).
+   * GET /api/project
+   */
+  public async getProjects(): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.get(
+      `${SunoApi.BASE_URL}/api/project`,
+      { timeout: 15000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Fetches one workspace (project) with its clips (membership checks).
+   * GET /api/project/{project_id}
+   */
+  public async getProject(projectId: string): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.get(
+      `${SunoApi.BASE_URL}/api/project/${projectId}`,
+      { timeout: 15000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Starts Suno's presigned image upload flow (for custom clip covers).
+   * POST /api/uploads/image/ {extension} → {id, url, fields}
+   */
+  public async createImageUpload(extension: string): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.post(
+      `${SunoApi.BASE_URL}/api/uploads/image/`,
+      { extension },
+      { timeout: 15000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Uploads image bytes to Suno's presigned S3 form.
+   */
+  public async uploadPresignedImage(url: string, fields: Record<string, string>, filename: string, contentType: string, bytes: Buffer): Promise<void> {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(fields || {})) {
+      form.append(key, value);
+    }
+    form.append('file', new Blob([Buffer.from(bytes)], { type: contentType }), filename);
+
+    const resp = await fetch(url, { method: 'POST', body: form });
+    if (!resp.ok) {
+      throw new Error(`presigned upload failed: HTTP ${resp.status}`);
+    }
+  }
+
+  /**
+   * Marks a presigned image upload as finished. Suno moderates the image;
+   * `moderation_status` must be "approved" before the cover can be applied.
+   * POST /api/uploads/image/{upload_id}/upload-finish/ → {moderation_status}
+   */
+  public async finishImageUpload(uploadId: string): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.post(
+      `${SunoApi.BASE_URL}/api/uploads/image/${uploadId}/upload-finish/`,
+      {},
+      { timeout: 15000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
+   * Updates a clip's metadata — the confirmed route for setting a custom cover:
+   * `POST /api/gen/{clip_id}/set_metadata/` with `{image_url}` (arbitrary URL)
+   * or `{image_s3_id: "image_<upload_id>"}` for an image uploaded through Suno.
+   * @param clipId The clip to update.
+   * @param fields Sparse metadata: title/lyrics/caption/image_url/image_s3_id/...
+   */
+  public async setClipMetadata(clipId: string, fields: Record<string, any>): Promise<any> {
+    await this.keepAlive(false);
+    if (!isValidClipId(clipId)) throw new Error('setClipMetadata: invalid clip id');
+
+    const response = await this.client.post(
+      `${SunoApi.BASE_URL}/api/gen/${clipId}/set_metadata/`,
+      fields,
+      { timeout: 15000 }
+    );
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+    return response.data;
+  }
+
+  /**
    * Fetches a clip's encrypted CDN media and returns it decrypted (raw MP4/Opus bytes).
    * Scheme (reverse-engineered from suno.com web player, verified live):
    *   1. POST /api/mango/rights {content_params:{content_id, content_type:'clip'}} -> {key, iv} (base64-wrapped AES-GCM)
