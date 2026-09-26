@@ -1163,10 +1163,25 @@ class SunoApi {
 
   /**
    * Fetches one playlist with its ordered clips (readback / membership checks).
-   * GET /api/playlist/v2/{playlist_id}
+   * The v2 route returns metadata only (clips deferred); the legacy
+   * `GET /api/playlist/{id}/` carries the ordered `playlist_clips` array, so it
+   * is tried first and v2 is the fallback for name/visibility reads.
    */
   public async getPlaylistV2(playlistId: string): Promise<any> {
     await this.keepAlive(false);
+    try {
+      const legacy = await this.client.get(
+        `${SunoApi.BASE_URL}/api/playlist/${playlistId}/`,
+        { timeout: 15000 }
+      );
+      if (legacy.status === 200 && legacy.data && Array.isArray(legacy.data.playlist_clips)) {
+        return legacy.data;
+      }
+    } catch (e: any) {
+      if (e?.response?.status !== 404 && e?.response?.status !== 405) {
+        logger.info('legacy playlist read failed, falling back to v2: ' + String(e?.message || e));
+      }
+    }
     const response = await this.client.get(
       `${SunoApi.BASE_URL}/api/playlist/v2/${playlistId}`,
       { timeout: 15000 }
