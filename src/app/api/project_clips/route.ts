@@ -36,6 +36,35 @@ export async function POST(req: NextRequest) {
   }
 }
 
+/**
+ * GET /api/project_clips?workspace_id=...
+ * Reads one workspace (project) for membership checks (idempotent backfills).
+ * Returns { workspace_id, name, clip_ids }.
+ */
+export async function GET(req: NextRequest) {
+  try {
+    const workspaceId = new URL(req.url).searchParams.get("workspace_id");
+    if (!workspaceId) {
+      return NextResponse.json({ error: "workspace_id required" }, { status: 400, headers: corsHeaders });
+    }
+    const p = await (await sunoApi()).getProject(workspaceId);
+    const body = p?.project || p?.data || p || {};
+    const entries = body.project_clips || body.clips || [];
+    const clipIds = entries.map((e: any) => e?.clip?.id || e?.id).filter(Boolean);
+    return NextResponse.json(
+      { workspace_id: workspaceId, name: body.name || "", clip_ids: clipIds, raw_count: entries.length },
+      { status: 200, headers: corsHeaders }
+    );
+  } catch (error: any) {
+    console.error("Error reading workspace:", error);
+    const status = error?.response?.status || 500;
+    return NextResponse.json(
+      { error: error?.response?.data?.detail || error?.message || String(error) },
+      { status, headers: corsHeaders }
+    );
+  }
+}
+
 export async function OPTIONS(request: Request) {
   return new Response(null, { status: 200, headers: corsHeaders });
 }

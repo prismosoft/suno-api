@@ -36,6 +36,35 @@ export async function POST(req: NextRequest) {
   }
 }
 
+/**
+ * GET /api/playlist_tracks?playlist_id=...
+ * Reads one playlist for membership checks (idempotent backfills).
+ * Returns { playlist_id, name, clip_ids } — clip order as Suno keeps it.
+ */
+export async function GET(req: NextRequest) {
+  try {
+    const playlistId = new URL(req.url).searchParams.get("playlist_id");
+    if (!playlistId) {
+      return NextResponse.json({ error: "playlist_id required" }, { status: 400, headers: corsHeaders });
+    }
+    const p = await (await sunoApi()).getPlaylistV2(playlistId);
+    const body = p?.playlist || p?.data || p || {};
+    const entries = body.playlist_clips || body.clips || [];
+    const clipIds = entries.map((e: any) => e?.clip?.id || e?.id).filter(Boolean);
+    return NextResponse.json(
+      { playlist_id: playlistId, name: body.name || "", clip_ids: clipIds, raw_count: entries.length },
+      { status: 200, headers: corsHeaders }
+    );
+  } catch (error: any) {
+    console.error("Error reading playlist:", error);
+    const status = error?.response?.status || 500;
+    return NextResponse.json(
+      { error: error?.response?.data?.detail || error?.message || String(error) },
+      { status, headers: corsHeaders }
+    );
+  }
+}
+
 export async function OPTIONS(request: Request) {
   return new Response(null, { status: 200, headers: corsHeaders });
 }
