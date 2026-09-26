@@ -37,17 +37,22 @@ export async function POST(req: NextRequest) {
 }
 
 /**
- * GET /api/playlist_tracks?playlist_id=...
+ * GET /api/playlist_tracks?playlist_id=...&debug=1
  * Reads one playlist for membership checks (idempotent backfills).
  * Returns { playlist_id, name, clip_ids } — clip order as Suno keeps it.
+ * `debug=1` returns Suno's raw payload so schema drift is visible.
  */
 export async function GET(req: NextRequest) {
   try {
     const playlistId = new URL(req.url).searchParams.get("playlist_id");
+    const debug = new URL(req.url).searchParams.get("debug");
     if (!playlistId) {
       return NextResponse.json({ error: "playlist_id required" }, { status: 400, headers: corsHeaders });
     }
     const p = await (await sunoApi()).getPlaylistV2(playlistId);
+    if (debug) {
+      return NextResponse.json({ raw: p }, { status: 200, headers: corsHeaders });
+    }
     const body = p?.playlist || p?.data || p || {};
     const entries = body.playlist_clips || body.clips || [];
     const clipIds = entries.map((e: any) => e?.clip?.id || e?.id).filter(Boolean);
