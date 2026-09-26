@@ -68,16 +68,30 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 5. apply as the clip cover via set_metadata with the cover_image shape
-    // (the live-verified pattern), and surface Suno's response verbatim so the
-    // caller sees exactly what was applied.
-    const applied = await api.setClipMetadata(clipId, {
-      cover_image: { id: `image_${upload.id}`, type: "generated" },
-      cover_art_session_id: finish?.session_id || upload.id,
-    });
+    // 5. apply as the clip cover via image_url pointing at the just-uploaded
+    // image on Suno's CDN — the live-verified pattern (verified 2026-09-25 on
+    // Merci Tatie: the clip's image_url re-pointed to the upload and the CDN
+    // served the new bytes). Two shapes that do NOT work: {image_s3_id} is
+    // silently ignored, and {cover_image:{id,type:"generated"}} 500s (it is
+    // for Suno-generated cover-art sessions, not uploaded images).
+    const coverUrl = `https://cdn2.suno.ai/image_${upload.id}.jpeg`;
+    await api.setClipMetadata(clipId, { image_url: coverUrl });
+
+    // 6. verify by reading the clip back: its image_url must now carry the
+    // uploaded image's ID.
+    const clip = await api.getClip(clipId) as any;
+    const applied = clip?.image_url || "";
+    if (!applied.includes(upload.id)) {
+      return NextResponse.json(
+        { ok: false, clip_id: clipId, upload_id: upload.id, cover_url_sent: coverUrl,
+          clip_image_url_after: applied,
+          error: "set_metadata did not re-point the clip cover — inspect the clip" },
+        { status: 502, headers: corsHeaders }
+      );
+    }
 
     return NextResponse.json(
-      { ok: true, clip_id: clipId, upload_id: upload.id, applied },
+      { ok: true, clip_id: clipId, upload_id: upload.id, image_url: applied },
       { status: 200, headers: corsHeaders }
     );
   } catch (error: any) {
