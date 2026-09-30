@@ -66,10 +66,6 @@ function load(): ProxyEntry[] {
   return pool;
 }
 
-function healthy(now = Date.now()): ProxyEntry[] {
-  return load().filter((e) => e.blockedUntil <= now);
-}
-
 function hash(key: string): number {
   let h = 0;
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
@@ -89,16 +85,33 @@ export class ProxyPoolExhausted extends Error {
 /**
  * Pick a session. `key` pins a conversation to one IP — pass a song id, a release id, or any
  * stable string. `skip` lets a caller ask for a different one after a block.
+ *
+ * A key hashes to a home slot in the *whole* pool and then walks forward to the first usable
+ * session. The modulus has to be over `all` and never over the healthy subset: `hash(key) %
+ * avail.length` meant a block anywhere in the pool changed the divisor, so every pinned
+ * conversation silently rehomed to a different exit IP at once — the precise thing the pinning
+ * exists to prevent, and invisible until a DistroKid login starts answering from a new country
+ * mid-session. Probing from a fixed home slot keeps a key on one IP for as long as that IP is
+ * usable, and moves only those keys whose own slot is out.
  */
 export function pickProxy(key?: string, skip: string[] = []): ProxyEntry {
   const all = load();
   if (!all.length) throw new Error("no proxies configured: set SUNO_PROXY_POOL or SUNO_PROXY_URL");
-  const avail = healthy().filter((e) => !skip.includes(e.id));
-  if (!avail.length) throw new ProxyPoolExhausted(all.length);
-  const chosen = key
-    ? avail[hash(key) % avail.length]
-    : avail.reduce((a, b) => (a.lastUsed <= b.lastUsed ? a : b)); // least recently used
-  chosen.lastUsed = Date.now();
+  const now = Date.now();
+  const usable = (e: ProxyEntry) => e.blockedUntil <= now && !skip.includes(e.id);
+  let chosen: ProxyEntry | undefined;
+  if (key) {
+    const home = hash(key) % all.length;
+    for (let i = 0; i < all.length && !chosen; i++) {
+      const candidate = all[(home + i) % all.length];
+      if (usable(candidate)) chosen = candidate;
+    }
+  } else {
+    const avail = all.filter(usable);
+    chosen = avail.length ? avail.reduce((a, b) => (a.lastUsed <= b.lastUsed ? a : b)) : undefined; // least recently used
+  }
+  if (!chosen) throw new ProxyPoolExhausted(all.length);
+  chosen.lastUsed = now;
   return chosen;
 }
 
