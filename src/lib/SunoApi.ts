@@ -288,14 +288,13 @@ class SunoApi {
     });
     const cookies = [];
     const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
-    cookies.push({
-      name: '__session',
-      value: this.currentToken+'',
-      domain: '.suno.com',
-      path: '/',
-      sameSite: lax
-    });
+    // The session JWT lives a minute, so the copies pasted into SUNO_COOKIE (`__session` and Clerk's suffixed
+    // `__session_<id>`) are long expired: suno.com checks them server-side and redirects to sign-in. Every
+    // `__session` name gets the fresh token instead, so a stale copy never overrides it.
+    const isSession = (key: string) => key === '__session' || key.startsWith('__session_');
+    const sessionNames = new Set(['__session', ...Object.keys(this.cookies).filter(isSession)]);
     for (const key in this.cookies) {
+      if (isSession(key)) continue;
       cookies.push({
         name: key,
         value: this.cookies[key]+'',
@@ -304,6 +303,14 @@ class SunoApi {
         sameSite: lax
       })
     }
+    for (const name of sessionNames)
+      cookies.push({
+        name,
+        value: this.currentToken+'',
+        domain: '.suno.com',
+        path: '/',
+        sameSite: lax
+      });
     await context.addCookies(cookies);
     return context;
   }
