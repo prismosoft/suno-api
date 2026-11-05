@@ -1,32 +1,30 @@
-# syntax=docker/dockerfile:1 
-                                                                                                                                                                                                    
-FROM node:lts-bookworm AS builder                                                                                       
-WORKDIR /src                                                                                                            
-COPY package*.json ./                                                                                                   
-RUN npm install                                                                                                         
-COPY . .                                                                                                               
-RUN npm run build                                                                                                       
-                                                                                                                    
-FROM node:lts-bookworm                                                                                                  
-WORKDIR /app                                                                                                            
-COPY package*.json ./                                                                                                   
-                                                                                                                    
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libnss3 \                                       
-    libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \                       
-    libgbm1 libxkbcommon0 libasound2 libcups2 xvfb ffmpeg                                                                      
-                                                                                                                    
-ARG SUNO_COOKIE             
-RUN if [ -z "$SUNO_COOKIE" ]; then echo "Warning: SUNO_COOKIE is not set. You will have to set the cookies in the Cookie header of your requests."; fi                                           
-ENV SUNO_COOKIE=${SUNO_COOKIE}
+# syntax=docker/dockerfile:1
+
+FROM node:lts-bookworm AS builder
+WORKDIR /src
+COPY package*.json ./
+# The build only needs electron importable (rebrowser-playwright-core references it), never its 100 MB binary from GitHub
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
+# Also downloads Chromium 1148 (@playwright/browser-chromium), the revision rebrowser-playwright-core drives
+RUN npm install
+COPY . .
+RUN npm run build && npm prune --omit=dev
+
+FROM node:lts-bookworm
+WORKDIR /app
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libnss3 \
+    libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libgbm1 libxkbcommon0 libasound2 libcups2 xvfb ffmpeg
+
 # Disable GPU acceleration, as with it suno-api won't work in a Docker environment
 ENV BROWSER_DISABLE_GPU=true
+# SUNO_COOKIE comes from the runtime environment only: as a build arg it was written into the build logs and the image.
 
-RUN npm install --only=production                                                                                       
-                                                                                                                    
-# Install all supported browsers, else switching browsers requires an image rebuild                                     
-RUN npx playwright install chromium                                                                                     
-# RUN npx playwright install firefox                                                                                     
-                                                                                                                    
+# The builder's production modules and browser, so this stage downloads nothing
+COPY package*.json ./
+COPY --from=builder /src/node_modules ./node_modules
+COPY --from=builder /root/.cache/ms-playwright /root/.cache/ms-playwright
 COPY --from=builder /src/.next ./.next
-EXPOSE 3000                                                                                                             
+EXPOSE 3000
 CMD ["npm", "run", "start"]
