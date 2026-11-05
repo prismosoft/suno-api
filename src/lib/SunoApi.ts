@@ -328,10 +328,8 @@ class SunoApi {
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
 
-    // Navigate and wait until the page makes its own authenticated studio-api call,
-    // then borrow that exact Authorization header for our in-page fetch.
-    logger.info('Loading suno.com/create in the captcha browser...');
-    await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 120000 });
+    // Listen before navigating: the page makes its first authenticated studio-api calls while it loads, and a
+    // listener added after goto missed them. Borrow that exact Authorization header for our in-page fetch.
     let pageAuthHeader: string | null = null;
     page.on('request', r => {
       if (r.url().includes('studio-api') && !pageAuthHeader) {
@@ -342,15 +340,31 @@ class SunoApi {
         }
       }
     });
-    for (let i = 0; i < 60 && !pageAuthHeader; i++)
-      await sleep(2, 2);
-    if (!pageAuthHeader)
-      throw new Error('Page never made an authenticated studio-api call — session cookies may be stale');
+    logger.info('Loading suno.com/create in the captcha browser...');
+    try {
+      await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 120000 });
+      for (let i = 0; i < 30 && !pageAuthHeader; i++)
+        await sleep(2, 2);
+    } catch (e) {
+      browser.browser()?.close().catch(() => {});
+      throw e;
+    }
+    if (!pageAuthHeader) {
+      // Where the page ended up (the path only): /create means signed in, a sign-in path means the session was refused.
+      logger.info('No studio-api call from the page; it is at ' + new URL(page.url()).pathname + ', using our own session token');
+      if (!this.currentToken) {
+        browser.browser()?.close().catch(() => {});
+        throw new Error('Page never made an authenticated studio-api call and there is no session token');
+      }
+      pageAuthHeader = `Bearer ${this.currentToken}`;
+    }
 
     // Solve Turnstile through the proxy so the token is IP-bound to our egress.
     const token = await this.solveTurnstileVia2Captcha();
-    if (!token)
+    if (!token) {
+      browser.browser()?.close().catch(() => {});
       throw new Error('Turnstile solve failed — no token from 2Captcha');
+    }
 
     // Build the real song payload the page will submit.
     const songPayload: any = {
