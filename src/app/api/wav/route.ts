@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sunoApi } from "@/lib/SunoApi";
+import { sunoApi, WavError } from "@/lib/SunoApi";
 import { corsHeaders } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -28,16 +28,20 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    // One try, and a second only for a quick transient failure: the whole request has to answer
+    // inside Cloudflare's 120 s or the caller gets a 524 and no reason. A WavError (Suno refused the
+    // download, e.g. no downloads left this month) never gets better by asking again.
+    const started = Date.now();
     let url: string | null = null;
     let lastError: any = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 2 && !url; attempt++) {
       try {
         url = await (await sunoApi()).getWavFileUrl(clipId);
-        break;
       } catch (err: any) {
         lastError = err;
         console.error(`WAV attempt ${attempt + 1} failed:`, err?.message);
-        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+        if (err instanceof WavError || Date.now() - started > 15000) break;
+        await new Promise((r) => setTimeout(r, 2000));
       }
     }
     if (!url) throw lastError;
@@ -67,8 +71,9 @@ export async function GET(req: NextRequest) {
     });
   } catch (error: any) {
     console.error("Error fetching WAV:", error?.message);
-    return new NextResponse(JSON.stringify({ error: "WAV fetch failed", detail: error?.message }), {
-      status: 500,
+    const refused = error instanceof WavError;
+    return new NextResponse(JSON.stringify({ error: "WAV fetch failed", detail: error?.message, reason: refused ? error.reason : undefined }), {
+      status: refused ? 409 : 500,
       headers: { "Content-Type": "application/json", ...corsHeaders }
     });
   }

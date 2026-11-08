@@ -1402,43 +1402,60 @@ class SunoApi {
    *   3. Poll GET /api/gen/{id}/wav_file/ → { wav_file_url }
    * NOTE: WAV is a paid-plan download and consumes a download credit per clip.
    */
-  public async getWavFileUrl(clipId: string, timeoutSeconds: number = 120, pollSeconds: number = 3): Promise<string> {
+  /**
+   * Suno's original WAV for a clip.
+   *
+   * Since late October 2026 downloads are metered: every clip has to be unlocked once
+   * (`is_download_unlocked`), and an unlock spends one of the plan's monthly downloads
+   * (`billing/info` -> `download_usage`; Pro has 20) or a bought top-up. The old unlock call,
+   * POST /api/billing/clips/{id}/download/, now answers 404, and a locked clip's wav_file stays `{}`
+   * forever -- that is how every DistroKid submit from 2026-11-08 timed out instead of failing.
+   * So a locked clip is unlocked through GET /api/download/clip/{id} (what suno.com calls), and when
+   * Suno refuses, this says why at once: no downloads left, with when they come back.
+   *
+   * The whole call stays under 100 s by default so /api/wav answers before Cloudflare's 120 s cut.
+   */
+  public async getWavFileUrl(clipId: string, timeoutSeconds: number = 90, pollSeconds: number = 5): Promise<string> {
     await this.keepAlive(false);
+    const get = (path: string) => this.client.get(`${SunoApi.BASE_URL}${path}`, { timeout: 15000 });
 
-    try {
-      await this.client.post(
-        `${SunoApi.BASE_URL}/api/billing/clips/${clipId}/download/`,
-        {},
-        { timeout: 15000 }
-      );
-    } catch (err: any) {
-      // Non-fatal: an already-charged/available WAV may reject the billing call.
-      logger.warn(`billing/clips/${clipId}/download/ -> ${err?.response?.status || err?.message}`);
-    }
+    const clip = (await get(`/api/feed/v2?ids=${clipId}`)).data?.clips?.[0];
+    if (!clip) throw new WavError(`Suno has no clip ${clipId} on this account`, 'not_found');
 
-    try {
-      await this.client.post(
-        `${SunoApi.BASE_URL}/api/gen/${clipId}/convert_wav/`,
-        {},
-        { timeout: 15000 }
-      );
-    } catch (err: any) {
-      logger.warn(`gen/${clipId}/convert_wav/ -> ${err?.response?.status || err?.message}`);
+    if (clip.is_download_unlocked !== true) {
+      const unlock = (await get(`/api/download/clip/${clipId}?format=wav`)).data || {};
+      if (unlock.ok !== true) {
+        let quota = '';
+        try {
+          const b = (await get('/api/billing/info/')).data || {};
+          const u = b.download_usage || {};
+          const left = Math.max(0, (u.current_period_downloads_limit ?? 0) - (u.current_period_downloads_used ?? 0)) + (u.additional_download_remaining ?? 0);
+          quota = ` Downloads left this period: ${left} (${u.current_period_downloads_used ?? '?'}/${u.current_period_downloads_limit ?? '?'} used, ` +
+            `${u.additional_download_remaining ?? 0} bought); the plan's downloads come back on ${String(b.renews_on || '?').slice(0, 10)}.`;
+        } catch { /* the reason below is enough on its own */ }
+        throw new WavError(`Suno refused to unlock "${clip.title}" for download (${unlock.reason || 'no reason'}: ${unlock.message || ''}).${quota}`,
+          unlock.reason || 'not_authorized');
+      }
     }
 
     const deadline = Date.now() + timeoutSeconds * 1000;
+    let asked = false;
     let lastError: any = null;
     while (Date.now() < deadline) {
       try {
-        const resp = await this.client.get(
-          `${SunoApi.BASE_URL}/api/gen/${clipId}/wav_file/`,
-          { timeout: 15000 }
-        );
-        const url = resp.data?.wav_file_url;
+        const url = (await get(`/api/gen/${clipId}/wav_file/`)).data?.wav_file_url;
         if (url) return url;
       } catch (err: any) {
         lastError = err;
         if (err?.response?.status === 401 || err?.response?.status === 403) throw err;
+      }
+      if (!asked) {
+        asked = true;
+        try {
+          await this.client.post(`${SunoApi.BASE_URL}/api/gen/${clipId}/convert_wav/`, {}, { timeout: 15000 });
+        } catch (err: any) {
+          logger.warn(`gen/${clipId}/convert_wav/ -> ${err?.response?.status || err?.message}`);
+        }
       }
       await sleep(pollSeconds, pollSeconds);
     }
@@ -1446,6 +1463,14 @@ class SunoApi {
       `WAV conversion for clip ${clipId} did not complete within ${timeoutSeconds}s` +
       (lastError ? ` (last error: ${lastError?.response?.status || lastError?.message})` : '')
     );
+  }
+}
+
+/** A WAV Suno will not give: retrying does not help, so callers fail at once. */
+export class WavError extends Error {
+  constructor(message: string, public reason: string) {
+    super(message);
+    this.name = 'WavError';
   }
 }
 
